@@ -264,3 +264,64 @@ keyboard + sheet scrolling.
 - Fixed: `imePadding()` double-counted IME insets -> removed.
 - Skipped (documented above): midnight staleness, preview vs. save-time `now`, invisible dream save (chunk 5),
   `collectAsStateWithLifecycle`.
+
+## Chunk 4 — resolve-flow
+
+**What changed**: Tapping an ACTIVE tick box opens a resolve sheet. Saving a "Not achieved" entry then asks "Set this
+goal again?". All of it is in `GoalsScreen.kt` (still the only UI file). Rows needed no changes.
+
+**Files**
+- `app/src/main/java/com/bolsar/remembergoals/GoalsScreen.kt`:
+  - `GoalsScreen(vm = viewModel(), resolveId: Long? = null)`: two new saveable states, `resolvingId: Long?` and
+    `setAgainId: Long?`. `LaunchedEffect(resolveId)` copies a non-null `resolveId` into `resolvingId`; null is ignored,
+    so it never closes an open sheet. Ids, not `Goal`s: they are saveable and the lookup reads the fresh row. The sheet
+    shows for `goals.find { it.id == resolvingId && it.status == ACTIVE }` inside `key(goal.id)` (fresh note state per
+    goal), so nothing shows before the first DB emission, for a missing id, or for an already-resolved goal. The set-again
+    dialog shows only once that row is really `FAILED` in the DB.
+  - `ResolveSheet(goal, onDismiss, onSave(achieved, note))`: serif goal title; text radios "Achieved" (olive when selected,
+    default) / "Not achieved" (vermilion); a `LedgerField` note whose label changes ("How did it go?" / "What got in the
+    way?"); "A few words, at least" error on a blank save; save button "Close the entry". The note is trimmed. `onSave`
+    runs **after** the sheet's hide animation, so the row doesn't flip and drop the sheet mid-animation. A `saved` flag
+    blocks double taps.
+  - `SetAgainDialog(goal, onDismiss, onYes)`: `AlertDialog` with paper background, 4dp corners and tonalElevation 0. Text:
+    `“<title>” for another 2 days, starting today.` (singular for amount 1). "Yes, again" -> `vm.setAgain(goal)`, then
+    dismiss. "No" just dismisses.
+  - `TextRadio(label, selected, color = ink, onClick)`: an underlined word used as a radio option (unselected = faint).
+    Used for the duration units and for Achieved/Not achieved.
+  - `LedgerSheet(sheetState, onDismiss, content)`: the shared paper `ModalBottomSheet` chrome (4dp top corners, hairline
+    handle, scrolling column at `NotebookMargin`), pulled out of `AddGoalSheet`. Reuse it for the promote-dream sheet.
+
+**How to open the resolve sheet for a goal id (chunk 6)**: pass it in, e.g. `GoalsScreen(resolveId = idFromIntent)` from
+`MainActivity`. Keep the id in Activity state that `onNewIntent` updates (e.g. `mutableStateOf<Long?>`). Each new
+non-null value opens the sheet, and you may reset it to null afterwards without closing the sheet. Tapping the same id
+twice needs a null in between (LaunchedEffect key). A recreation re-runs the effect, but a resolved goal never re-opens
+(ACTIVE filter). The
+sheet defaults to "Achieved". For a "Not achieved" notification action, add an `initialAchieved` param to
+`ResolveSheet`/`GoalsScreen` (one line).
+
+**Verified on emulator** (Small_Phone, light + dark): the blank-note error; achieved -> olive check + date + "early" +
+note; failed -> vermilion X + note -> set-again dialog -> Yes inserts a new ACTIVE row on top with the same duration (the
+old FAILED row stays); No -> no new row.
+
+**Known issues / deferred**
+- Dark mode: the dialog is paper on dimmed paper, so separation is subtle (only the scrim). Acceptable. `AlertDialog` has
+  no border param, so a custom `Dialog` would be needed for a hairline border.
+- The resolved sheet stays saveable by id. A process death while it is open restores it (intended).
+
+**For chunk 5 (dreams archive)**
+- Reuse `LedgerSheet` + `LedgerField` + `TextRadio` for the promote sheet (amount + unit ->
+  `vm.promote(dream, amount, unit)`, validate 1..999 like `AddGoalSheet`). Consider extracting the amount+unit `Row` from
+  `AddGoalSheet` into a private composable when you reuse it (it would be its second use).
+- The same id-state pattern works: `promotingId: Long?` + `dreams.find { it.id == promotingId }`.
+- The `LazyColumn` in `GoalsScreen` starts with a hairline `item {}`. Put the dreams section above it.
+
+**Review fixes** (`ponytail:ponytail-review`: lean, nothing to cut; `code-review` medium: 7 findings)
+- Fixed: the set-again prompt could show when `resolve` was a no-op (goal already closed elsewhere), or before the write
+  committed -> the dialog is gated on the row being `FAILED` in the DB.
+- Fixed: `rememberSaveable(resolveId)` key reset closed the sheet when chunk 6 consumed the id (set to null) ->
+  `LaunchedEffect` that copies only non-null ids.
+- Fixed: sheet state (note/choice) leaked across goals when a new id arrived while the sheet was open -> `key(goal.id)`.
+- Fixed: a cancelled hide still ran `onDismiss`, which could clear a newly requested id -> it clears only its own id.
+  (Saving on a cancelled hide is intentional: the user pressed save, don't lose it.)
+- Fixed: a duplicated text-radio pattern -> `TextRadio`.
+- Skipped: the per-recomposition `find` scan for set-again (trivial on a personal list).
