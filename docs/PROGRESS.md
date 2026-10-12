@@ -1038,3 +1038,9 @@ chunks 7–10 each had their own review.) 7 findings, 6 fixed:
 **Known issues**
 - TalkBack custom actions not verified on a device (see above).
 - The `code-review` skill only reviewed this chunk's diff, not the whole tree.
+
+## Fix — highlight pulse on tinted cards
+
+The chip's pulse lerped the card surface toward its strong hue; pale orange (and dark-mode brown) mixed into a muddy
+tan/grey. Now the surface stays as is and the pulse is a 2dp ring in the card's strong hue (accent on plain cards) plus a
+2% lift (`GoalCardView` in `GoalsScreen.kt`). Verified on emulator, light + dark, orange and red cards (screenrecord frames).

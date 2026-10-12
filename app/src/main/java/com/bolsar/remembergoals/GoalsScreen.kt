@@ -86,7 +86,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.CustomAccessibilityAction
@@ -340,9 +340,11 @@ private fun GoalCardView(goal: Goal, now: Long, highlighted: Boolean, onTick: ()
     val tinted = goal.status != Status.ACTIVE || overdue
     val (base, strong) = MaterialTheme.colorScheme.tone(goal.status, overdue)
     val muted = mutedOn(tinted)
-    // Pulse toward the card's own strong hue (blue on a plain card): mixing blue into orange/green read as grey.
+    // Pulse = a ring in the card's own strong hue (blue on a plain card) + a slight lift. Tinting the surface instead
+    // muddied pale orange/green into tan/brown.
     val pulse = if (tinted) strong else MaterialTheme.colorScheme.primary
-    val bg by animateColorAsState(if (highlighted) lerp(base, pulse, 0.3f) else base, spring(), label = "card")
+    val bg by animateColorAsState(base, spring(), label = "card")
+    val ring by animateFloatAsState(if (highlighted) 1f else 0f, spring(stiffness = Spring.StiffnessLow), label = "ring")
     val left = ChronoUnit.DAYS.between(day(now), day(deadline))
     val countdown = when {
         goal.status != Status.ACTIVE -> null
@@ -351,7 +353,13 @@ private fun GoalCardView(goal: Goal, now: Long, highlighted: Boolean, onTick: ()
         else -> "${left}d left"
     }
     Row(
-        Modifier.fillMaxWidth().clip(CardShape).background(bg).padding(start = 16.dp, top = 12.dp, bottom = 12.dp, end = 4.dp),
+        Modifier
+            .fillMaxWidth()
+            .graphicsLayer { scaleX = 1f + ring * .02f; scaleY = scaleX }
+            .clip(CardShape)
+            .background(bg)
+            .border(2.dp, pulse.copy(alpha = ring), CardShape)
+            .padding(start = 16.dp, top = 12.dp, bottom = 12.dp, end = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(Modifier.weight(1f).padding(vertical = 4.dp)) {
