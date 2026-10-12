@@ -650,3 +650,97 @@ Implement dreams as Telegram's "Archived Chats" row, one-to-one:
 10. **v2-telegram-archive** — dreams as Telegram archive row exactly per the reference above, Dreams page, promote.
 11. **v2-polish** — new app icon, README + screenshots rewritten for v2, whole-repo `ponytail-audit` + `code-review`,
     emulator walkthrough light + dark, Status section updated.
+
+## Chunk 8 — v2-cards-timeline
+
+**What changed**: v1 paper ledger replaced by the v2 look. The palette, type and theme are new, the bundled fonts are
+gone, and goals are rounded cards with status surfaces. The list is a derived timeline: goal cards never move, and
+event rows (overdue / achieved / not achieved) land on top with a chip that scrolls back to the goal. There is a new
+`draft` column with a real `Migration(1, 2)`. Sheets, dialog and dreams section are restyled only.
+
+**Files**
+- `ui/theme/Color.kt`: the v2 palette from "Visual direction v2" (light + dark, all colors incl. draft/archive).
+- `ui/theme/Theme.kt`: proper `lightColorScheme` / `darkColorScheme`, every slot set. **Slot mapping** (read these):
+  primary = accent blue, secondary/secondaryContainer = ACHIEVED strong/surface, error/errorContainer = FAILED,
+  tertiary/tertiaryContainer = overdue orange, primaryContainer/onPrimaryContainer = draft surface/strong (unused until
+  chunk 9), surface = card, background = page, surfaceVariant = archive grey, onSurfaceVariant = muted.
+  `Gutter = 16.dp` replaces `NotebookMargin`.
+- `ui/theme/Type.kt`: platform sans only. headlineLarge 32sp SemiBold (screen title), headlineSmall 22sp SemiBold
+  (sheet titles), titleMedium 17sp SemiBold (card title), bodyMedium 15sp, labelLarge 13sp Medium (meta, chips).
+  `Serif`, `Mono`, `DateStyle` removed.
+- Deleted `res/font/*` and `LICENSES/OFL-1.1.txt`. README design notes and license section updated (README
+  screenshots are still v1, chunk 11 rewrites them). `@color/paper` renamed `@color/background` (window background +
+  launcher icon background, new values).
+- `Goal.kt`: `@ColumnInfo(defaultValue = "0") val draft: Boolean = false`. `sealed interface Entry { goal, time, key }`
+  with `GoalCard` (time = createdAt, key `g<id>`) and `GoalEvent(goal, overdue)` (time = deadline for overdue, key
+  `o<id>`; else resolvedAt, key `r<id>`). `timeline(goals, now)`: cards + OVERDUE (deadline < now and ACTIVE or
+  resolved after the deadline) + resolution events, `sortedByDescending { time }` (stable, so equal times keep the
+  DAO's newest-first order).
+- `AppDb.kt`: `version = 2`, `MIGRATION_1_2` (`ALTER TABLE Goal ADD COLUMN draft INTEGER NOT NULL DEFAULT 0`),
+  `.addMigrations(...)`. `goals()` / `dreams()` filter `draft = 0`.
+- `GoalsScreen.kt`:
+  - `now` (`mutableLongStateOf`) refreshed by `repeatOnLifecycle(RESUMED) { while (true) { now = …; delay(60s) } }`:
+    on every resume plus once a minute while resumed. `entries = remember(goals, now) { timeline(...) }`.
+  - Items are `items(entries, key = { it.key })` wrapped in `Modifier.animateItem()` (spring defaults: fade +
+    placement), 16dp gutter, 10dp gaps (5dp vertical padding per item).
+  - `GoalCardView`: 20dp rounded card, surface from `ColorScheme.tone(status, overdue)`, animated with
+    `animateColorAsState`. Title, "Due <date> · Nd left / due today / Nd overdue" (no countdown once resolved),
+    description, tick box. The note is no longer on the card: it lives on the event row. Highlight = surface lerped
+    22% toward the accent for 600ms (animated in and out).
+  - `EventRow`: 16dp rounded card on the status surface, a non-interactive tick box, the note (or "Deadline passed"),
+    meta "Achieved · <date> · early" / "Not achieved · <date>" / "Overdue · <date>", and a pill chip "↳ <title>".
+    The chip calls `showGoal`: `animateScrollToItem(head + index)` then the pulse. One `Job`, so a new tap cancels the
+    running pulse. `head` = lazy items emitted before the timeline ("dreams", "reminders", "empty"). **Keep `head` in
+    sync if you add/remove header items** (chunk 9/10).
+  - `TickBox(status, overdue, onClick?)`: 22dp rounded square (6dp corners). ACTIVE = outline. ACHIEVED green + check,
+    FAILED red + X, overdue orange + "!". The fill uses `animateColorAsState` and the mark strokes in line by line
+    (`animateFloatAsState` spring + `lerp`). It animates only when the status changes on screen, not when a card scrolls
+    into view. Clickable (48dp target) only when `onClick` is set and the goal is ACTIVE.
+  - `mutedOn(tinted)`: muted grey on plain cards, ink 70% on tinted status surfaces (the grey fails AA there).
+  - Restyle only: `RoundedSheet` (28dp top corners, card color, pill handle), `Field` (label + soft rounded input,
+    red border + message on error), `Choice` (pill radio, tinted when selected) replaces `TextRadio`, `SaveButton`
+    (filled accent `Button`, 14dp corners; labels "Add goal" / "Make it a goal" / "Save"), dialog on card color with
+    default rounded shape, FAB accent with default rounded shape and a stroke-drawn "+", empty state "Nothing here
+    yet.", reminders line in accent. Dreams section: same pull-reveal mechanics, grey 16dp cards + "Promote".
+- `app/src/test/.../TimelineTest.kt`: ordering of cards + overdue/resolution events (incl. "resolved in time => no
+  overdue" and "overdue after then failed => two events"), and overdue appearing only once now > deadline.
+
+**Decisions**
+- Overdue goal card keeps an open (tappable) box. Only the event row shows the orange "!".
+- A resolved card keeps its due date but drops the countdown. Its resolution date and "early" are on the event row.
+- Events for a goal are derived on every emission/minute: no event table, no worker.
+- Drafts: column + query filters only. Nothing writes `draft = 1` yet (chunk 9).
+- FAB scale animation and the Add Goal page transition are left for chunk 9 (they belong with the full-page Add Goal).
+- Dark `onPrimary` = page background (white on #5B8CFF failed AA), so the FAB "+" and button labels are dark on blue
+  in dark mode.
+
+**Review fixes** (`ponytail:ponytail-review`: one shrink; `code-review` medium: 9 findings)
+- ponytail: resolution event condition `status != ACTIVE && resolvedAt != null` -> `resolvedAt != null`.
+- Fixed: orange "overdue" meta text on the peach card and grey meta on green/red surfaces were below AA -> `mutedOn`.
+- Fixed: white on the light dark-mode accent (3.2:1) -> dark `onPrimary`.
+- Fixed: the chip's scroll index hard-coded "dreams + reminders" -> one `head` count next to the items, including "empty".
+- Fixed: a second chip tap was cut short by the first pulse's reset -> one pulse `Job`, cancelled on each tap.
+- Fixed: two status->color `when` tables (surface and box) -> one `ColorScheme.tone(status, overdue)`.
+- Fixed: `animateColorAsState` on event rows whose status can't change -> plain color.
+- Skipped: precise "wake at the next deadline" instead of the 60s tick (the spec says a minute is enough); Room schema
+  export + `MigrationTestHelper` test (no instrumented-test setup; the migration was verified on the emulator against a
+  real v1 database); named shapes for the 12/14/16/20dp literals (nit); draft palette not read yet (spec puts it here).
+
+**Verified on emulator** (Small_Phone API 37, light + dark). Installed over the chunk 7 build with a real v1 DB: no
+crash, `user_version` 2, `draft` column added, both existing goals kept. Inserted test rows (pushed DB): an overdue
+ACTIVE goal (orange card + "Deadline passed" event), an achieved-early goal (green card + event with note + "early"),
+and a goal that went overdue and then failed (red card + overdue event + failed event). Tapping a "↳" chip scrolls to
+the card and pulses it (checked with `screenrecord` frames). Tick -> blank-note error -> note -> save: the event row
+springs in on top, the card stays in place and turns green, and the check strokes in. Add Goal and resolve sheets
+restyled. Dreams pull-reveal still works.
+
+**Known issues / for next chunks**
+- Chunk 9: `+` still opens the bottom sheet (`AddGoalSheet`). Replace it with the full page and write
+  `draft = true` rows. `goals()` / `dreams()` exclude drafts, so you need a `drafts()` query or a drafts-inclusive
+  goals query. Drafts go in the main list by `createdAt` (add a `DraftCard` entry or handle `goal.draft` in
+  `timeline`, and add a `head`-aware key). Draft surface = `primaryContainer`, strong = `onPrimaryContainer`.
+- Chunk 10: replace `DreamsSection` + the nested-scroll reveal with the Telegram archive row. If the archive item
+  disappears when there are no dreams, update `head`.
+- Chunk 11: new app icon (the launcher still has the v1 ink tick on the new background color), README screenshots.
+- The highlight color is the status surface mixed with blue, which looks greyish on orange cards. Acceptable.
+- The event row shows only the date (no time of day).

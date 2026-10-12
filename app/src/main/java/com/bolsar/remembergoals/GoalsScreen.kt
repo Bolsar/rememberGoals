@@ -37,6 +37,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.FloatingActionButtonDefaults
@@ -209,16 +210,21 @@ fun GoalsScreen(
     }
 
     val showReminders = remindersOff && goals.orEmpty().any { it.status == Status.ACTIVE }
-    // Reference chip: scroll the goal's card into view, then pulse it. Index = the lazy items before the timeline + its row.
+    val showEmpty = goals?.isEmpty() == true && loadedDreams != null
+    // Lazy items emitted before the timeline (keep in sync with the LazyColumn below): "dreams", "reminders", "empty".
+    val head = 1 + (if (showReminders) 1 else 0) + (if (showEmpty) 1 else 0)
+    // Reference chip: scroll the goal's card into view, then pulse it. A new tap cancels the running pulse.
     var highlighted by remember { mutableStateOf<Long?>(null) }
+    val pulse = remember { mutableStateOf<Job?>(null) }
     fun showGoal(goal: Goal) {
         val i = entries.indexOfFirst { it is GoalCard && it.goal.id == goal.id }
         if (i < 0) return
-        scope.launch {
-            list.animateScrollToItem(i + 1 + (if (showReminders) 1 else 0)) // + "dreams" (+ "reminders")
+        pulse.value?.cancel()
+        pulse.value = scope.launch {
+            list.animateScrollToItem(head + i)
             highlighted = goal.id
             delay(600)
-            if (highlighted == goal.id) highlighted = null
+            highlighted = null
         }
     }
 
@@ -267,7 +273,7 @@ fun GoalsScreen(
                 }
             }
             if (showReminders) item(key = "reminders") { RemindersOffLine() }
-            if (goals?.isEmpty() == true && loadedDreams != null) item(key = "empty") { EmptyState(hasDreams = dreams.isNotEmpty()) }
+            if (showEmpty) item(key = "empty") { EmptyState(hasDreams = dreams.isNotEmpty()) }
             items(entries, key = { it.key }) { entry ->
                 Box(Modifier.animateItem().padding(horizontal = Gutter, vertical = 5.dp)) { // spring fade + placement
                     when (entry) {
@@ -305,16 +311,17 @@ fun GoalsScreen(
     }
 }
 
-/** Status surface: achieved green, failed red, overdue orange, else the plain card. */
-@Composable
-private fun surfaceOf(status: Status, overdue: Boolean): Color = MaterialTheme.colorScheme.run {
-    when {
-        status == Status.ACHIEVED -> secondaryContainer
-        status == Status.FAILED -> errorContainer
-        overdue -> tertiaryContainer
-        else -> surface
-    }
+/** (surface, strong) per state: achieved green, failed red, overdue orange, else the plain card and no fill. */
+private fun ColorScheme.tone(status: Status, overdue: Boolean): Pair<Color, Color> = when {
+    status == Status.ACHIEVED -> secondaryContainer to secondary
+    status == Status.FAILED -> errorContainer to error
+    overdue -> tertiaryContainer to tertiary
+    else -> surface to Color.Transparent
 }
+
+/** Muted text: the theme's muted grey on a plain card, ink 70% on a tinted status surface (keeps AA contrast). */
+@Composable
+private fun mutedOn(tinted: Boolean) = MaterialTheme.colorScheme.run { if (tinted) onSurface.copy(alpha = 0.7f) else onSurfaceVariant }
 
 /** No goals yet. */
 @Composable
@@ -358,7 +365,8 @@ private fun RemindersOffLine() {
 private fun GoalCardView(goal: Goal, now: Long, highlighted: Boolean, onTick: () -> Unit) {
     val deadline = goal.deadline!!
     val overdue = goal.status == Status.ACTIVE && deadline < now
-    val base = surfaceOf(goal.status, overdue)
+    val base = MaterialTheme.colorScheme.tone(goal.status, overdue).first
+    val muted = mutedOn(goal.status != Status.ACTIVE || overdue)
     val bg by animateColorAsState(if (highlighted) lerp(base, MaterialTheme.colorScheme.primary, 0.22f) else base, spring(), label = "card")
     val left = ChronoUnit.DAYS.between(day(now), day(deadline))
     val countdown = when {
@@ -376,12 +384,12 @@ private fun GoalCardView(goal: Goal, now: Long, highlighted: Boolean, onTick: ()
             Text(
                 "Due ${day(deadline).format(dateFormat)}" + (countdown?.let { " · $it" } ?: ""),
                 style = MaterialTheme.typography.labelLarge,
-                color = if (overdue) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.onSurfaceVariant,
+                color = muted,
                 modifier = Modifier.padding(top = 2.dp),
             )
             goal.description?.let {
                 Text(
-                    it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    it, style = MaterialTheme.typography.bodyMedium, color = muted,
                     maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 6.dp),
                 )
             }
@@ -394,8 +402,8 @@ private fun GoalCardView(goal: Goal, now: Long, highlighted: Boolean, onTick: ()
 @Composable
 private fun EventRow(event: GoalEvent, onShowGoal: () -> Unit) {
     val goal = event.goal
-    val status = if (event.overdue) Status.ACTIVE else goal.status
-    val bg by animateColorAsState(surfaceOf(status, event.overdue), spring(), label = "event")
+    val status = if (event.overdue) Status.ACTIVE else goal.status // ACTIVE + overdue = the orange "deadline passed" tone
+    val bg = MaterialTheme.colorScheme.tone(status, event.overdue).first
     val date = day(event.time).format(dateFormat)
     val meta = when (status) {
         Status.ACTIVE -> "Overdue · $date"
@@ -406,7 +414,7 @@ private fun EventRow(event: GoalEvent, onShowGoal: () -> Unit) {
         TickBox(status, overdue = event.overdue, onClick = null)
         Column(Modifier.weight(1f).padding(start = 12.dp)) {
             Text(if (event.overdue) "Deadline passed" else goal.note.orEmpty(), style = MaterialTheme.typography.bodyMedium)
-            Text(meta, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 2.dp))
+            Text(meta, style = MaterialTheme.typography.labelLarge, color = mutedOn(true), modifier = Modifier.padding(top = 2.dp))
             Text(
                 "↳ ${goal.title}",
                 style = MaterialTheme.typography.labelLarge,
@@ -430,12 +438,8 @@ private fun EventRow(event: GoalEvent, onShowGoal: () -> Unit) {
 @Composable
 private fun TickBox(status: Status, overdue: Boolean, onClick: (() -> Unit)?) {
     val scheme = MaterialTheme.colorScheme
-    val (strong, on) = when {
-        status == Status.ACHIEVED -> scheme.secondary to scheme.onSecondary
-        status == Status.FAILED -> scheme.error to scheme.onError
-        overdue -> scheme.tertiary to scheme.onTertiary
-        else -> Color.Transparent to Color.Transparent
-    }
+    val strong = scheme.tone(status, overdue).second
+    val on = scheme.onSecondary // onSecondary/onError/onTertiary are the same color in both schemes
     val done = status != Status.ACTIVE || overdue
     val fill by animateColorAsState(strong, spring(), label = "fill")
     val drawn by animateFloatAsState(if (done) 1f else 0f, spring(stiffness = Spring.StiffnessLow), label = "mark")

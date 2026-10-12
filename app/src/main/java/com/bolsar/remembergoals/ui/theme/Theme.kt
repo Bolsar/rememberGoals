@@ -28,7 +28,7 @@ private val LightScheme = lightColorScheme(
 )
 
 private val DarkScheme = darkColorScheme(
-    primary = AccentDark, onPrimary = Color.White, primaryContainer = DraftDark, onPrimaryContainer = DraftStrongDark, inversePrimary = Accent,
+    primary = AccentDark, onPrimary = BackgroundDark, primaryContainer = DraftDark, onPrimaryContainer = DraftStrongDark, inversePrimary = Accent,
     secondary = AchievedStrongDark, onSecondary = BackgroundDark, secondaryContainer = AchievedDark, onSecondaryContainer = InkDark,
     tertiary = OverdueStrongDark, onTertiary = BackgroundDark, tertiaryContainer = OverdueDark, onTertiaryContainer = InkDark,
     error = FailedStrongDark, onError = BackgroundDark, errorContainer = FailedDark, onErrorContainer = InkDark,

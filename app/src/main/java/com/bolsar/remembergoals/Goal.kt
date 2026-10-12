@@ -69,6 +69,6 @@ fun timeline(goals: List<Goal>, now: Long): List<Entry> = goals.flatMap { g ->
         GoalEvent(g, overdue = true).takeIf {
             g.deadline != null && g.deadline < now && (g.status == Status.ACTIVE || (g.resolvedAt ?: 0) > g.deadline)
         },
-        GoalEvent(g, overdue = false).takeIf { g.status != Status.ACTIVE && g.resolvedAt != null },
+        GoalEvent(g, overdue = false).takeIf { g.resolvedAt != null },
     )
 }.sortedByDescending { it.time }
