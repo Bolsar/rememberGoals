@@ -53,6 +53,9 @@ interface GoalDao {
     @Query("UPDATE Goal SET status = :status, note = :note, resolvedAt = :resolvedAt WHERE id = :id AND status = 'ACTIVE' AND deadline IS NOT NULL")
     suspend fun resolve(id: Long, status: Status, note: String, resolvedAt: Long)
 
+    @Query("UPDATE Goal SET title = :title, description = :description, durationAmount = :amount, durationUnit = :unit, deadline = :deadline WHERE id = :id AND status = 'ACTIVE' AND draft = 0 AND deadline IS NOT NULL")
+    suspend fun edit(id: Long, title: String, description: String?, amount: Int, unit: DurationUnit, deadline: Long): Int
+
     @Query("UPDATE Goal SET durationAmount = :amount, durationUnit = :unit, deadline = :deadline, createdAt = :now WHERE id = :id AND deadline IS NULL")
     suspend fun promote(id: Long, amount: Int, unit: DurationUnit, deadline: Long, now: Long): Int
 }

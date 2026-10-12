@@ -138,7 +138,7 @@ fun GoalsScreen(
     val goals by vm.goals.collectAsState() // null = not loaded yet (no empty-state flash)
     val loadedDreams by vm.dreams.collectAsState()
     val dreams = loadedDreams.orEmpty()
-    // Page over the list: null = none, 0 = new goal, > 0 = the draft being completed, DREAMS_PAGE = dreams.
+    // Page over the list: null = none, 0 = new goal, > 0 = the draft being completed or the goal being edited, DREAMS_PAGE = dreams.
     var page by rememberSaveable { mutableStateOf<Long?>(null) }
     // Ids, not Goal objects: saveable, and the lookup below always reads the fresh row.
     var resolvingId by rememberSaveable { mutableStateOf<Long?>(null) }
@@ -210,7 +210,7 @@ fun GoalsScreen(
             return@AnimatedContent
         }
         if (shown != null) {
-            AddGoalPage(shown, draft = goals?.find { it.id == shown && it.draft }, onSave = vm::savePage) { page = null }
+            AddGoalPage(shown, goal = goals?.find { it.id == shown }, onSave = vm::savePage, onEdit = vm::edit) { page = null }
             return@AnimatedContent
         }
         // Ignore taps while the page is still animating out: the same id would revive that closed page's composition.
@@ -251,9 +251,10 @@ fun GoalsScreen(
                     Box(Modifier.animateItem().padding(horizontal = Gutter, vertical = 5.dp)) { // spring fade + placement
                         when (entry) {
                             is GoalCard -> if (entry.goal.draft) DraftCardView(entry.goal) { open(entry.goal.id) }
-                            else GoalCardView(entry.goal, now, highlighted == entry.goal.id) {
-                                resolvingId = entry.goal.id; resolvingAchieved = true
-                            }
+                            else GoalCardView(
+                                entry.goal, now, highlighted == entry.goal.id,
+                                onEdit = { open(entry.goal.id) }.takeIf { entry.goal.status == Status.ACTIVE }, // resolved = final
+                            ) { resolvingId = entry.goal.id; resolvingAchieved = true }
                             is GoalEvent -> EventRow(entry) { showGoal(entry.goal) }
                         }
                     }
@@ -334,7 +335,7 @@ private fun RemindersOffLine() {
 
 /** The goal itself. It never moves; only its surface follows the status (and pulses when a reference chip points here). */
 @Composable
-private fun GoalCardView(goal: Goal, now: Long, highlighted: Boolean, onTick: () -> Unit) {
+private fun GoalCardView(goal: Goal, now: Long, highlighted: Boolean, onEdit: (() -> Unit)?, onTick: () -> Unit) {
     val deadline = goal.deadline!!
     val overdue = goal.status == Status.ACTIVE && deadline < now
     val tinted = goal.status != Status.ACTIVE || overdue
@@ -359,6 +360,7 @@ private fun GoalCardView(goal: Goal, now: Long, highlighted: Boolean, onTick: ()
             .clip(CardShape)
             .background(bg)
             .border(2.dp, pulse.copy(alpha = ring), CardShape)
+            .clickable(enabled = onEdit != null, onClickLabel = "Edit goal") { onEdit?.invoke() }
             .padding(start = 16.dp, top = 12.dp, bottom = 12.dp, end = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -509,22 +511,34 @@ private fun DraftCardView(goal: Goal, onClick: () -> Unit) {
 }
 
 /**
- * Full Add Goal page. [id] 0 = new, else [draft] reopened (it prefills the fields once; after that the saveable fields
- * win, also across rotation and process death). Add => [onClose] with a goal/dream; back (system or arrow) => a draft,
+ * Full Add Goal page. [id] 0 = new, else [goal] reopened: a draft, or an ACTIVE goal to edit (it prefills the fields
+ * once; after that the saveable fields win, also across rotation and process death).
+ * Editing: "Save" => [onEdit] with [Goal.edited] (start kept, deadline re-counted); back discards the changes, no draft. Add => [onClose] with a goal/dream; back (system or arrow) => a draft,
  * or null when nothing was typed. See [pageGoal]. The app going to the background writes the draft right away, so a
  * swipe from Recents keeps it; [onSave] finds that row again by the saveable createdAt, so nothing is duplicated.
  */
 @Composable
-private fun AddGoalPage(id: Long, draft: Goal?, onSave: (id: Long, createdAt: Long, Goal?) -> Unit, onClose: () -> Unit) {
-    var title by rememberSaveable { mutableStateOf(draft?.title.orEmpty()) }
-    var amount by rememberSaveable { mutableStateOf(draft?.durationAmount?.toString().orEmpty()) }
-    var unit by rememberSaveable { mutableStateOf(draft?.durationUnit ?: DurationUnit.DAYS) }
-    var description by rememberSaveable { mutableStateOf(draft?.description.orEmpty()) }
-    val createdAt = rememberSaveable { draft?.createdAt ?: System.currentTimeMillis() }
+private fun AddGoalPage(
+    id: Long,
+    goal: Goal?,
+    onSave: (id: Long, createdAt: Long, Goal?) -> Unit,
+    onEdit: (Goal) -> Unit,
+    onClose: () -> Unit,
+) {
+    val editing = goal?.draft == false
+    var title by rememberSaveable { mutableStateOf(goal?.title.orEmpty()) }
+    var amount by rememberSaveable { mutableStateOf(goal?.durationAmount?.toString().orEmpty()) }
+    var unit by rememberSaveable { mutableStateOf(goal?.durationUnit ?: DurationUnit.DAYS) }
+    var description by rememberSaveable { mutableStateOf(goal?.description.orEmpty()) }
+    val createdAt = rememberSaveable { goal?.createdAt ?: System.currentTimeMillis() }
     var tried by rememberSaveable { mutableStateOf(false) }
     var closed by remember { mutableStateOf(false) } // closes once: Add / back during the exit animation do nothing
-    val amountError = amount.toIntOrNull() == 0 // digits-only, max 3 chars => null or 0..999
-    fun save(add: Boolean) = onSave(id, createdAt, pageGoal(id, createdAt, title, description, amount, unit, System.currentTimeMillis(), draft = !add))
+    // digits-only, max 3 chars => null or 0..999; an edited goal must keep a duration
+    val amountError = amount.toIntOrNull() == 0 || (editing && tried && amount.isEmpty())
+    fun save(add: Boolean) {
+        if (editing) { if (add) goal!!.edited(title, description, amount, unit)?.let(onEdit); return }
+        onSave(id, createdAt, pageGoal(id, createdAt, title, description, amount, unit, System.currentTimeMillis(), draft = !add))
+    }
     fun close(add: Boolean) {
         if (closed) return
         closed = true
@@ -544,14 +558,14 @@ private fun AddGoalPage(id: Long, draft: Goal?, onSave: (id: Long, createdAt: Lo
             Button(
                 {
                     tried = true
-                    if (title.isNotBlank() && !amountError) close(add = true)
+                    if (title.isNotBlank() && !(amountError || editing && amount.isEmpty())) close(add = true)
                 },
                 shape = RoundedCornerShape(14.dp),
-            ) { Text("Add") }
+            ) { Text(if (editing) "Save" else "Add") }
         }
         Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = Gutter, vertical = 12.dp)) {
             Text(
-                if (id == 0L) "New goal" else "Complete the goal",
+                when { editing -> "Edit goal"; id == 0L -> "New goal"; else -> "Complete the goal" },
                 style = MaterialTheme.typography.headlineLarge,
                 modifier = Modifier.padding(start = 4.dp, bottom = 16.dp),
             )
@@ -561,10 +575,14 @@ private fun AddGoalPage(id: Long, draft: Goal?, onSave: (id: Long, createdAt: Lo
                     error = "A goal needs a name".takeIf { tried && title.isBlank() },
                     textStyle = MaterialTheme.typography.titleMedium,
                 )
-                DurationFields(amount, { amount = it }, unit, { unit = it }, amountError, emptyHint = "No duration — saved as a dream")
+                DurationFields(
+                    amount, { amount = it }, unit, { unit = it }, amountError,
+                    emptyHint = if (editing) "A goal needs a duration" else "No duration — saved as a dream",
+                    start = if (editing) createdAt else System.currentTimeMillis(),
+                )
                 Field("Description", description, { description = it }, singleLine = false)
             }
-            Text(
+            if (!editing) Text(
                 "Leave without adding and it stays here as a draft.",
                 style = MaterialTheme.typography.labelLarge,
                 color = scheme.onSurfaceVariant,
@@ -583,6 +601,7 @@ private fun DurationFields(
     onUnit: (DurationUnit) -> Unit,
     error: Boolean,
     emptyHint: String,
+    start: Long = System.currentTimeMillis(), // the deadline counts from here (an edited goal: its own start)
 ) {
     val n = amount.toIntOrNull()?.takeIf { it > 0 }
     Row(verticalAlignment = Alignment.Bottom) {
@@ -597,7 +616,7 @@ private fun DurationFields(
         }
     }
     Text(
-        if (n == null) emptyHint else "Due ${day(deadlineFrom(System.currentTimeMillis(), n, unit)).format(dateFormat)}",
+        if (n == null) emptyHint else "Due ${day(deadlineFrom(start, n, unit)).format(dateFormat)}",
         style = MaterialTheme.typography.labelLarge,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.padding(top = 8.dp),

@@ -1044,3 +1044,14 @@ chunks 7–10 each had their own review.) 7 findings, 6 fixed:
 The chip's pulse lerped the card surface toward its strong hue; pale orange (and dark-mode brown) mixed into a muddy
 tan/grey. Now the surface stays as is and the pulse is a 2dp ring in the card's strong hue (accent on plain cards) plus a
 2% lift (`GoalCardView` in `GoalsScreen.kt`). Verified on emulator, light + dark, orange and red cards (screenrecord frames).
+
+## Edit goal
+
+Tap an ACTIVE goal card (incl. overdue) to open the Add Goal page in edit mode ("Edit goal", **Save**), prefilled.
+- `Goal.edited()` (Goal.kt, `EditGoalTest`): keeps `createdAt`, so the card never moves; deadline re-counted from it.
+  A goal can't lose its duration here (empty amount = error), so edits never turn a goal into a dream.
+- `GoalDao.edit` is a targeted UPDATE guarded by `status = 'ACTIVE' AND draft = 0`: a goal resolved while its edit
+  page is open stays resolved. `GoalsViewModel.edit` cancels then reschedules both reminders.
+- Back (or backgrounding) discards the edit: no draft for an existing goal. Resolved goals are final (not tappable).
+- Dreams are not edited here (they keep Promote).
+Verified on emulator: prefill, empty-duration error, save keeps position + new due date, back discards.

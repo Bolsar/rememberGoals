@@ -23,6 +23,9 @@ them one.
 - **Drafts**: leave the page without tapping Add (back arrow, system back, or just switching away from the app) and
   whatever you typed is kept as a purple draft card marked "Complete the goal". Tap it to reopen the page prefilled.
   Add turns it into a goal or a dream in place. Empty every field and leave to discard it.
+- **Editing**: tap an open goal's card to reopen the same page as "Edit goal": name, duration and description. The
+  start date stays, so the card keeps its place and the deadline is counted from that start. **Save** applies the
+  changes and moves the reminders; back discards them. Closed goals (achieved / not achieved) are final.
 - **Dreams**: a goal added without a duration is a dream. Dreams sit in an "archived chats" row, like Telegram's:
   - The row starts hidden. Pull the list down at the top to reveal it. Past the snap point the arrow flips and the
     accent fills the row. Let go there and the row stays out.
