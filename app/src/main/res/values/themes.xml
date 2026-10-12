@@ -1,0 +1,8 @@
+<resources>
+    <string name="app_name">Remember Goals</string>
+    <!-- Window theme only (pre-Compose flash); Compose draws everything. Matches Paper in Color.kt. -->
+    <style name="Theme.RememberGoals" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/paper</item>
+    </style>
+    <color name="paper">#F4EFE6</color>
+</resources>
