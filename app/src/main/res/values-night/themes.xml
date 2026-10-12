@@ -1,6 +1,6 @@
 <resources>
     <style name="Theme.RememberGoals" parent="android:Theme.Material.NoActionBar">
-        <item name="android:windowBackground">@color/paper</item>
+        <item name="android:windowBackground">@color/background</item>
     </style>
-    <color name="paper">#1A1815</color>
+    <color name="background">#0F1114</color>
 </resources>

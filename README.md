@@ -16,11 +16,11 @@ how it went. Goals without a deadline are dreams: they wait, folded away above t
 - **Dreams**: save a goal without a duration and it becomes a dream. Dreams are hidden above the list; pull the list
   down (or tap `↓ N dreams`) to reveal them. **Promote** a dream by giving it a duration, and it joins the ledger.
 - **Closing a goal**: tap its box and choose *Achieved* or *Not achieved*. A short note is required either way. Achieved
-  goals get an olive check and the date you ticked them (`· early` if before the deadline). Failed goals get a red X.
+  goals get a green check and the date you ticked them (`· early` if before the deadline). Failed goals get a red X.
 - **Set again**: after a fail the app asks whether to try again. Yes adds a new goal with the same duration, starting
   today. The failed entry stays in the ledger as it was.
 - **Reminders**: a notification one day before the deadline and one at the deadline, each with *Achieved* / *Not
-  achieved* buttons that open the same note sheet. If notifications are blocked, a faint "reminders are off" line
+  achieved* buttons that open the same note sheet. If notifications are blocked, a "Reminders are off" line
   links to the system settings.
 
 Everything is stored on the device (Room / SQLite). No account, no network.
@@ -50,16 +50,7 @@ Code lives flat in `app/src/main/java/com/bolsar/remembergoals/`: `Goal.kt` (ent
 
 ## Design notes
 
-The app is meant to feel like a paper ledger, not a stock Material app:
-
-- Warm paper and ink colors (charcoal paper and cream ink in dark mode), no dynamic color, no shadows, no cards.
-- One accent, vermilion, used only for the add button and failed goals. Achieved goals are olive.
-- Rows are separated by hairline rules, with a wide notebook margin on the left.
-- Instrument Serif for titles, JetBrains Mono for dates and countdowns, the platform sans for everything else.
-- The tick boxes, the `+` and the launcher icon are drawn by hand (Canvas / vector), not taken from an icon set.
-
-## Licenses
-
-The bundled fonts, [Instrument Serif](https://github.com/Instrument/instrument-serif) and
-[JetBrains Mono](https://github.com/JetBrains/JetBrainsMono), are licensed under the SIL Open Font License 1.1. See
-[`LICENSES/OFL-1.1.txt`](LICENSES/OFL-1.1.txt).
+Version 2 (in progress, see [`docs/PROGRESS.md`](docs/PROGRESS.md)): soft rounded cards on a light grey (or near-black)
+background, the platform sans font, one blue accent, no dynamic color. A goal card never moves; when a goal is
+achieved, missed or goes overdue, a small event card (the note, a ticked box, and a chip that scrolls back to the goal)
+is added on top, and the goal card turns green, red or orange. The screenshots above still show the v1 paper ledger.

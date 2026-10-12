@@ -3,7 +3,11 @@ package com.bolsar.remembergoals
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -21,20 +25,22 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.FloatingActionButtonDefaults
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
@@ -44,45 +50,52 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.lerp
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.runtime.collectAsState
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Velocity
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.bolsar.remembergoals.ui.theme.DateStyle
-import com.bolsar.remembergoals.ui.theme.NotebookMargin
+import com.bolsar.remembergoals.ui.theme.Gutter
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 import java.time.Instant
@@ -93,13 +106,14 @@ import java.time.temporal.ChronoUnit
 import kotlin.math.roundToInt
 
 private val dateFormat = DateTimeFormatter.ofPattern("d MMM yyyy")
+private val CardShape = RoundedCornerShape(20.dp)
 
 private fun day(millis: Long): LocalDate = Instant.ofEpochMilli(millis).atZone(ZoneId.systemDefault()).toLocalDate()
 
 /**
  * [resolve]: (goal id, preselect "Achieved") from a notification — opens the resolve sheet, then [onResolveHandled]
  * lets the caller clear it, so the same notification can open the sheet again later.
- * [remindersOff]: notifications are blocked, so a faint line offers the system settings.
+ * [remindersOff]: notifications are blocked, so a line offers the system settings.
  */
 @Composable
 fun GoalsScreen(
@@ -123,6 +137,16 @@ fun GoalsScreen(
             resolvingId = id; resolvingAchieved = achieved; onResolveHandled()
         }
     }
+
+    // "now" drives overdue cards/events: refreshed on every resume and once a minute while resumed (no worker needed).
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    LaunchedEffect(lifecycle) {
+        lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            while (true) { now = System.currentTimeMillis(); delay(60_000) }
+        }
+    }
+    val entries = remember(goals, now) { timeline(goals.orEmpty(), now) }
 
     // Dreams reveal (Telegram archive): pulling down at the top of the list grows the dreams item (`pull` px, read only
     // in layout, so dragging never recomposes); past the threshold it snaps open and stays open (`dreamsOpen`).
@@ -185,20 +209,40 @@ fun GoalsScreen(
         snapshotFlow { loadedDreams?.isEmpty() }.drop(1).collect { if (it == true && dreamsOpen) settle(false) }
     }
 
+    val showReminders = remindersOff && goals.orEmpty().any { it.status == Status.ACTIVE }
+    val showEmpty = goals?.isEmpty() == true && loadedDreams != null
+    // Lazy items emitted before the timeline (keep in sync with the LazyColumn below): "dreams", "reminders", "empty".
+    val head = 1 + (if (showReminders) 1 else 0) + (if (showEmpty) 1 else 0)
+    // Reference chip: scroll the goal's card into view, then pulse it. A new tap cancels the running pulse.
+    var highlighted by remember { mutableStateOf<Long?>(null) }
+    val pulse = remember { mutableStateOf<Job?>(null) }
+    fun showGoal(goal: Goal) {
+        val i = entries.indexOfFirst { it is GoalCard && it.goal.id == goal.id }
+        if (i < 0) return
+        pulse.value?.cancel()
+        pulse.value = scope.launch {
+            list.animateScrollToItem(head + i)
+            highlighted = goal.id
+            delay(600)
+            highlighted = null
+        }
+    }
+
     Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .background(MaterialTheme.colorScheme.background) // rows scroll under the title, so hide them
+                    .background(MaterialTheme.colorScheme.background) // cards scroll under the title, so hide them
                     .statusBarsPadding()
-                    .padding(start = NotebookMargin, end = 24.dp, top = 24.dp, bottom = 8.dp),
+                    .padding(start = Gutter + 4.dp, end = Gutter + 4.dp, top = 20.dp, bottom = 12.dp),
             ) {
-                Text("Goals", style = MaterialTheme.typography.displayMedium, modifier = Modifier.weight(1f).alignByBaseline())
+                Text("Goals", style = MaterialTheme.typography.headlineLarge, modifier = Modifier.weight(1f).alignByBaseline())
                 if (dreams.isNotEmpty() && !dreamsOpen) {
                     Text(
                         "↓ ${dreams.size} dream${if (dreams.size == 1) "" else "s"}",
-                        style = DateStyle,
+                        style = MaterialTheme.typography.labelLarge,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.alignByBaseline().clickable(onClickLabel = "Show dreams") { openDreams() },
                     )
@@ -228,11 +272,17 @@ fun GoalsScreen(
                     DreamsSection(dreams, onCollapse = { settle(false) }, onPromote = { promotingId = it.id })
                 }
             }
-            if (remindersOff && goals.orEmpty().any { it.status == Status.ACTIVE }) item(key = "reminders") { RemindersOffLine() }
-            item(key = "rule") { HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant) }
-            if (goals?.isEmpty() == true && loadedDreams != null) item(key = "empty") { EmptyLedger(hasDreams = dreams.isNotEmpty()) }
-            items(goals.orEmpty(), key = { it.id }) { goal ->
-                GoalRow(goal, onTick = { resolvingId = goal.id; resolvingAchieved = true })
+            if (showReminders) item(key = "reminders") { RemindersOffLine() }
+            if (showEmpty) item(key = "empty") { EmptyState(hasDreams = dreams.isNotEmpty()) }
+            items(entries, key = { it.key }) { entry ->
+                Box(Modifier.animateItem().padding(horizontal = Gutter, vertical = 5.dp)) { // spring fade + placement
+                    when (entry) {
+                        is GoalCard -> GoalCardView(entry.goal, now, highlighted == entry.goal.id) {
+                            resolvingId = entry.goal.id; resolvingAchieved = true
+                        }
+                        is GoalEvent -> EventRow(entry) { showGoal(entry.goal) }
+                    }
+                }
             }
         }
     }
@@ -261,17 +311,29 @@ fun GoalsScreen(
     }
 }
 
-/** No goals yet: a blank page, not a blank screen. */
+/** (surface, strong) per state: achieved green, failed red, overdue orange, else the plain card and no fill. */
+private fun ColorScheme.tone(status: Status, overdue: Boolean): Pair<Color, Color> = when {
+    status == Status.ACHIEVED -> secondaryContainer to secondary
+    status == Status.FAILED -> errorContainer to error
+    overdue -> tertiaryContainer to tertiary
+    else -> surface to Color.Transparent
+}
+
+/** Muted text: the theme's muted grey on a plain card, ink 70% on a tinted status surface (keeps AA contrast). */
 @Composable
-private fun EmptyLedger(hasDreams: Boolean) {
-    Column(Modifier.padding(start = NotebookMargin, end = 24.dp, top = 32.dp)) {
-        Text("A clean page.", style = MaterialTheme.typography.headlineSmall.copy(fontStyle = FontStyle.Italic))
+private fun mutedOn(tinted: Boolean) = MaterialTheme.colorScheme.run { if (tinted) onSurface.copy(alpha = 0.7f) else onSurfaceVariant }
+
+/** No goals yet. */
+@Composable
+private fun EmptyState(hasDreams: Boolean) {
+    Column(Modifier.padding(horizontal = Gutter + 4.dp, vertical = 24.dp)) {
+        Text("Nothing here yet.", style = MaterialTheme.typography.headlineSmall)
         Text(
-            if (hasDreams) "Tap + to write down a goal, or give one of your dreams a deadline."
-            else "Tap + to write down your first goal. Leave out the duration and it waits up here as a dream.",
+            if (hasDreams) "Tap + to add a goal, or give one of your dreams a deadline."
+            else "Tap + to add your first goal. Leave out the duration and it waits up here as a dream.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(top = 8.dp),
+            modifier = Modifier.padding(top = 6.dp),
         )
     }
 }
@@ -281,9 +343,9 @@ private fun EmptyLedger(hasDreams: Boolean) {
 private fun RemindersOffLine() {
     val context = LocalContext.current
     Text(
-        "reminders are off · turn on",
-        style = DateStyle,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        "Reminders are off · Turn on",
+        style = MaterialTheme.typography.labelLarge,
+        color = MaterialTheme.colorScheme.primary,
         modifier = Modifier
             .clickable(onClickLabel = "Open notification settings") {
                 runCatching { // some OEM/kiosk builds lack this screen: fall back to the app's details page, else do nothing
@@ -294,74 +356,117 @@ private fun RemindersOffLine() {
                     context.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", context.packageName, null)))
                 }
             }
-            .padding(start = NotebookMargin, end = 24.dp, top = 4.dp, bottom = 12.dp),
+            .padding(horizontal = Gutter + 4.dp, vertical = 8.dp),
     )
 }
 
+/** The goal itself. It never moves; only its surface follows the status (and pulses when a reference chip points here). */
 @Composable
-private fun GoalRow(goal: Goal, onTick: () -> Unit) {
-    val faint = MaterialTheme.colorScheme.onSurfaceVariant
-    val meta = when (goal.status) {
-        Status.ACTIVE -> {
-            val left = ChronoUnit.DAYS.between(LocalDate.now(), day(goal.deadline!!))
-            val countdown = when {
-                left > 0 -> "${left}d left"
-                left == 0L -> "due today"
-                else -> "${-left}d over"
-            }
-            "due ${day(goal.deadline).format(dateFormat)} · $countdown"
-        }
-        Status.ACHIEVED -> "achieved ${day(goal.resolvedAt!!).format(dateFormat)}" +
-            if (day(goal.resolvedAt) < day(goal.deadline!!)) " · early" else ""
-        Status.FAILED -> "failed ${day(goal.resolvedAt!!).format(dateFormat)}"
+private fun GoalCardView(goal: Goal, now: Long, highlighted: Boolean, onTick: () -> Unit) {
+    val deadline = goal.deadline!!
+    val overdue = goal.status == Status.ACTIVE && deadline < now
+    val base = MaterialTheme.colorScheme.tone(goal.status, overdue).first
+    val muted = mutedOn(goal.status != Status.ACTIVE || overdue)
+    val bg by animateColorAsState(if (highlighted) lerp(base, MaterialTheme.colorScheme.primary, 0.22f) else base, spring(), label = "card")
+    val left = ChronoUnit.DAYS.between(day(now), day(deadline))
+    val countdown = when {
+        goal.status != Status.ACTIVE -> null
+        overdue -> if (left == 0L) "overdue" else "${-left}d overdue"
+        left == 0L -> "due today"
+        else -> "${left}d left"
     }
-    Row(Modifier.padding(start = NotebookMargin, end = 12.dp, top = 14.dp, bottom = 14.dp)) {
-        Column(Modifier.weight(1f)) {
+    Row(
+        Modifier.fillMaxWidth().clip(CardShape).background(bg).padding(start = 16.dp, top = 12.dp, bottom = 12.dp, end = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f).padding(vertical = 4.dp)) {
+            Text(goal.title, style = MaterialTheme.typography.titleMedium)
             Text(
-                goal.title,
-                style = MaterialTheme.typography.titleLarge,
-                color = if (goal.status == Status.ACTIVE) MaterialTheme.colorScheme.onSurface else faint,
+                "Due ${day(deadline).format(dateFormat)}" + (countdown?.let { " · $it" } ?: ""),
+                style = MaterialTheme.typography.labelLarge,
+                color = muted,
+                modifier = Modifier.padding(top = 2.dp),
             )
-            Text(meta, style = DateStyle, color = faint, modifier = Modifier.padding(top = 2.dp))
             goal.description?.let {
-                Text(it, style = MaterialTheme.typography.bodyMedium, color = faint, maxLines = 2, modifier = Modifier.padding(top = 6.dp))
-            }
-            goal.note?.let {
-                Text("“$it”", style = MaterialTheme.typography.titleMedium.copy(fontStyle = FontStyle.Italic), modifier = Modifier.padding(top = 6.dp))
+                Text(
+                    it, style = MaterialTheme.typography.bodyMedium, color = muted,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 6.dp),
+                )
             }
         }
-        TickBox(goal.status, onTick)
+        TickBox(goal.status, overdue = false, onClick = onTick)
     }
-    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 }
 
-/** Hand-drawn square: ink outline (ACTIVE), olive + check (ACHIEVED), vermilion + X (FAILED). */
+/** Something happened to a goal (overdue / achieved / not achieved): ticked box, the note, and a chip back to the goal. */
 @Composable
-private fun TickBox(status: Status, onClick: () -> Unit) {
+private fun EventRow(event: GoalEvent, onShowGoal: () -> Unit) {
+    val goal = event.goal
+    val status = if (event.overdue) Status.ACTIVE else goal.status // ACTIVE + overdue = the orange "deadline passed" tone
+    val bg = MaterialTheme.colorScheme.tone(status, event.overdue).first
+    val date = day(event.time).format(dateFormat)
+    val meta = when (status) {
+        Status.ACTIVE -> "Overdue · $date"
+        Status.ACHIEVED -> "Achieved · $date" + if (day(event.time) < day(goal.deadline!!)) " · early" else ""
+        Status.FAILED -> "Not achieved · $date"
+    }
+    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(bg).padding(14.dp)) {
+        TickBox(status, overdue = event.overdue, onClick = null)
+        Column(Modifier.weight(1f).padding(start = 12.dp)) {
+            Text(if (event.overdue) "Deadline passed" else goal.note.orEmpty(), style = MaterialTheme.typography.bodyMedium)
+            Text(meta, style = MaterialTheme.typography.labelLarge, color = mutedOn(true), modifier = Modifier.padding(top = 2.dp))
+            Text(
+                "↳ ${goal.title}",
+                style = MaterialTheme.typography.labelLarge,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .padding(top = 8.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.7f))
+                    .clickable(onClickLabel = "Show goal", onClick = onShowGoal)
+                    .padding(horizontal = 10.dp, vertical = 5.dp),
+            )
+        }
+    }
+}
+
+/**
+ * Rounded box. ACTIVE = outline (tappable when [onClick] is set); ACHIEVED green + check, FAILED red + X, [overdue]
+ * orange + "!". The fill fades and the mark strokes in, line by line, when the status changes on screen.
+ */
+@Composable
+private fun TickBox(status: Status, overdue: Boolean, onClick: (() -> Unit)?) {
     val scheme = MaterialTheme.colorScheme
+    val strong = scheme.tone(status, overdue).second
+    val on = scheme.onSecondary // onSecondary/onError/onTertiary are the same color in both schemes
+    val done = status != Status.ACTIVE || overdue
+    val fill by animateColorAsState(strong, spring(), label = "fill")
+    val drawn by animateFloatAsState(if (done) 1f else 0f, spring(stiffness = Spring.StiffnessLow), label = "mark")
+    val outline = scheme.outline
+    val box = Modifier.semantics { contentDescription = if (overdue) "overdue" else status.name.lowercase() }
     Box(
-        Modifier
-            .size(48.dp)
-            // ponytail: resolved rows are final, so only ACTIVE boxes take taps.
-            .toggleable(status != Status.ACTIVE, enabled = status == Status.ACTIVE, role = Role.Checkbox) { onClick() }
-            .semantics { contentDescription = status.name.lowercase() },
+        if (onClick == null) box
+        // ponytail: resolved goals are final, so only ACTIVE boxes take taps.
+        else box.size(48.dp).toggleable(done, enabled = status == Status.ACTIVE, role = Role.Checkbox) { onClick() },
         contentAlignment = Alignment.Center,
     ) {
-        Canvas(Modifier.size(20.dp)) {
-            val w = 1.5.dp.toPx()
+        Canvas(Modifier.size(22.dp)) {
             val s = size.width
-            when (status) {
-                Status.ACTIVE -> drawRect(scheme.onSurface, style = Stroke(w))
-                Status.ACHIEVED -> {
-                    drawRect(scheme.secondary)
-                    drawLine(scheme.onSecondary, Offset(s * .22f, s * .52f), Offset(s * .42f, s * .72f), w)
-                    drawLine(scheme.onSecondary, Offset(s * .42f, s * .72f), Offset(s * .78f, s * .30f), w)
-                }
-                Status.FAILED -> {
-                    drawRect(scheme.tertiary)
-                    drawLine(scheme.onTertiary, Offset(s * .28f, s * .28f), Offset(s * .72f, s * .72f), w)
-                    drawLine(scheme.onTertiary, Offset(s * .72f, s * .28f), Offset(s * .28f, s * .72f), w)
-                }
+            val r = CornerRadius(6.dp.toPx())
+            val w = 2.dp.toPx()
+            drawRoundRect(fill, cornerRadius = r)
+            if (!done) drawRoundRect(outline, cornerRadius = r, style = Stroke(1.5.dp.toPx()))
+            fun o(x: Float, y: Float) = Offset(s * x, s * y)
+            val lines = when {
+                status == Status.ACHIEVED -> listOf(o(.27f, .52f) to o(.44f, .68f), o(.44f, .68f) to o(.75f, .34f))
+                status == Status.FAILED -> listOf(o(.32f, .32f) to o(.68f, .68f), o(.68f, .32f) to o(.32f, .68f))
+                overdue -> listOf(o(.5f, .24f) to o(.5f, .56f), o(.5f, .75f) to o(.5f, .76f))
+                else -> emptyList()
+            }
+            lines.forEachIndexed { i, (a, b) -> // each line gets an equal slice of the progress
+                val t = (drawn * lines.size - i).coerceIn(0f, 1f)
+                if (t > 0f) drawLine(on, a, lerp(a, b, t), w, StrokeCap.Round)
             }
         }
     }
@@ -371,17 +476,16 @@ private fun TickBox(status: Status, onClick: () -> Unit) {
 private fun AddFab(onClick: () -> Unit) {
     FloatingActionButton(
         onClick = onClick,
-        shape = RoundedCornerShape(4.dp),
-        containerColor = MaterialTheme.colorScheme.tertiary,
-        contentColor = MaterialTheme.colorScheme.onTertiary,
+        containerColor = MaterialTheme.colorScheme.primary,
+        contentColor = MaterialTheme.colorScheme.onPrimary,
         elevation = FloatingActionButtonDefaults.elevation(0.dp, 0.dp, 0.dp, 0.dp),
         modifier = Modifier.semantics { contentDescription = "Add goal" },
     ) {
-        val ink = MaterialTheme.colorScheme.onTertiary
-        Canvas(Modifier.size(20.dp)) {
-            val w = 1.5.dp.toPx()
-            drawLine(ink, Offset(size.width / 2, 0f), Offset(size.width / 2, size.height), w)
-            drawLine(ink, Offset(0f, size.height / 2), Offset(size.width, size.height / 2), w)
+        val ink = MaterialTheme.colorScheme.onPrimary
+        Canvas(Modifier.size(18.dp)) {
+            val w = 2.dp.toPx()
+            drawLine(ink, Offset(size.width / 2, 0f), Offset(size.width / 2, size.height), w, StrokeCap.Round)
+            drawLine(ink, Offset(0f, size.height / 2), Offset(size.width, size.height / 2), w, StrokeCap.Round)
         }
     }
 }
@@ -401,29 +505,26 @@ private fun AddGoalSheet(onDismiss: () -> Unit, onSave: (String, String?, Int?, 
     val titleError = tried && title.isBlank()
     val amountError = n == 0
 
-    LedgerSheet(sheet, onDismiss) {
-        Text("New goal", style = MaterialTheme.typography.headlineMedium)
-        LedgerField(
+    RoundedSheet(sheet, onDismiss) {
+        Text("New goal", style = MaterialTheme.typography.headlineSmall)
+        Field(
             "Name", title, { title = it },
             error = "A goal needs a name".takeIf { titleError },
-            textStyle = MaterialTheme.typography.titleLarge,
+            textStyle = MaterialTheme.typography.titleMedium,
         )
         DurationFields(amount, { amount = it }, unit, { unit = it }, amountError, emptyHint = "No duration — saved as a dream")
-        LedgerField("Description", description, { description = it }, singleLine = false)
-        TextButton(
-            onClick = {
-                tried = true
-                if (saved || title.isBlank() || amountError) return@TextButton
-                saved = true
-                onSave(title.trim(), description.trim().ifBlank { null }, n, unit.takeIf { n != null })
-                scope.launch { sheet.hide() }.invokeOnCompletion { onDismiss() }
-            },
-            modifier = Modifier.align(Alignment.End).padding(top = 16.dp),
-        ) { Text("Write it down", style = MaterialTheme.typography.titleMedium) }
+        Field("Description", description, { description = it }, singleLine = false)
+        SaveButton("Add goal") {
+            tried = true
+            if (saved || title.isBlank() || amountError) return@SaveButton
+            saved = true
+            onSave(title.trim(), description.trim().ifBlank { null }, n, unit.takeIf { n != null })
+            scope.launch { sheet.hide() }.invokeOnCompletion { onDismiss() }
+        }
     }
 }
 
-/** Amount (digits only, max 3) + days/weeks/months, then a mono line: the due-date preview, or [emptyHint] if no valid amount. */
+/** Amount (digits only, max 3) + days/weeks/months, then a line: the due-date preview, or [emptyHint] if no valid amount. */
 @Composable
 private fun DurationFields(
     amount: String,
@@ -435,56 +536,60 @@ private fun DurationFields(
 ) {
     val n = amount.toIntOrNull()?.takeIf { it > 0 }
     Row(verticalAlignment = Alignment.Bottom) {
-        LedgerField(
+        Field(
             "For", amount, { onAmount(it.filter(Char::isDigit).take(3)) },
-            modifier = Modifier.width(72.dp),
+            modifier = Modifier.width(80.dp),
             error = "1–999".takeIf { error },
             keyboardType = KeyboardType.Number,
         )
-        Row(Modifier.padding(start = 20.dp, bottom = if (error) 22.dp else 6.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-            DurationUnit.entries.forEach { u -> TextRadio(u.name.lowercase(), u == unit) { onUnit(u) } }
+        Row(Modifier.padding(start = 12.dp, bottom = if (error) 26.dp else 7.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            DurationUnit.entries.forEach { u -> Choice(u.name.lowercase(), u == unit) { onUnit(u) } }
         }
     }
     Text(
-        if (n == null) emptyHint else "due ${day(deadlineFrom(System.currentTimeMillis(), n, unit)).format(dateFormat)}",
-        style = DateStyle,
+        if (n == null) emptyHint else "Due ${day(deadlineFrom(System.currentTimeMillis(), n, unit)).format(dateFormat)}",
+        style = MaterialTheme.typography.labelLarge,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.padding(top = 8.dp),
     )
 }
 
-/** The archive: faded italic serif, one ruled row per dream. Tapping the heading folds it away. */
+/** The archive (restyled; chunk 10 replaces it with the Telegram archive row): grey cards, tap the heading to fold. */
 @Composable
 private fun DreamsSection(dreams: List<Goal>, onCollapse: () -> Unit, onPromote: (Goal) -> Unit) {
-    val faint = MaterialTheme.colorScheme.onSurfaceVariant
-    Column(Modifier.padding(bottom = 24.dp)) {
+    val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    Column(Modifier.padding(start = Gutter, end = Gutter, bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(
             Modifier
                 .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
                 .clickable(onClickLabel = "Hide dreams", onClick = onCollapse)
-                .padding(start = NotebookMargin, end = 24.dp, top = 8.dp, bottom = 10.dp),
+                .padding(horizontal = 4.dp, vertical = 8.dp),
         ) {
-            Text("Dreams", style = MaterialTheme.typography.headlineSmall.copy(fontStyle = FontStyle.Italic), color = faint, modifier = Modifier.weight(1f).alignByBaseline())
-            Text("↑ fold", style = DateStyle, color = faint, modifier = Modifier.alignByBaseline())
+            Text("Dreams", style = MaterialTheme.typography.titleMedium, color = muted, modifier = Modifier.weight(1f).alignByBaseline())
+            Text("↑ Hide", style = MaterialTheme.typography.labelLarge, color = muted, modifier = Modifier.alignByBaseline())
         }
         if (dreams.isEmpty()) {
             Text(
                 "None yet. A goal saved without a duration waits here.",
-                style = MaterialTheme.typography.bodyMedium.copy(fontStyle = FontStyle.Italic),
-                color = faint,
-                modifier = Modifier.padding(start = NotebookMargin, end = 24.dp),
+                style = MaterialTheme.typography.bodyMedium,
+                color = muted,
+                modifier = Modifier.padding(horizontal = 4.dp),
             )
         }
         dreams.forEach { dream ->
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            Row(Modifier.padding(start = NotebookMargin, end = 12.dp, top = 10.dp, bottom = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(MaterialTheme.colorScheme.surfaceVariant)
+                    .padding(start = 16.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 Column(Modifier.weight(1f)) {
-                    Text(dream.title, style = MaterialTheme.typography.titleLarge.copy(fontStyle = FontStyle.Italic), color = faint)
+                    Text(dream.title, style = MaterialTheme.typography.titleMedium)
                     dream.description?.let {
-                        Text(it, style = MaterialTheme.typography.bodyMedium, color = faint, maxLines = 2, modifier = Modifier.padding(top = 4.dp))
+                        Text(it, style = MaterialTheme.typography.bodyMedium, color = muted, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     }
                 }
-                TextButton({ onPromote(dream) }) { Text("Promote", style = MaterialTheme.typography.bodyMedium) }
+                TextButton({ onPromote(dream) }) { Text("Promote", style = MaterialTheme.typography.labelLarge) }
             }
         }
     }
@@ -502,23 +607,20 @@ private fun PromoteSheet(dream: Goal, onDismiss: () -> Unit, onSave: (Int, Durat
     var saved by remember { mutableStateOf(false) } // blocks a double tap during the hide animation
     val n = amount.toIntOrNull()?.takeIf { it > 0 } // digits-only, max 3 chars => null or 1..999
 
-    LedgerSheet(sheet, onDismiss) {
-        Text(dream.title, style = MaterialTheme.typography.headlineMedium.copy(fontStyle = FontStyle.Italic))
+    RoundedSheet(sheet, onDismiss) {
+        Text(dream.title, style = MaterialTheme.typography.headlineSmall)
         DurationFields(
             amount, { amount = it }, unit, { unit = it },
             error = n == null && (tried || amount.isNotEmpty()),
             emptyHint = "Give it a deadline to make it a goal",
         )
-        TextButton(
-            onClick = {
-                tried = true
-                if (saved || n == null) return@TextButton
-                saved = true
-                // Save after the hide: the dream leaves the list on save, which would drop this sheet mid-animation.
-                scope.launch { sheet.hide() }.invokeOnCompletion { onSave(n, unit); onDismiss() }
-            },
-            modifier = Modifier.align(Alignment.End).padding(top = 16.dp),
-        ) { Text("Make it a goal", style = MaterialTheme.typography.titleMedium) }
+        SaveButton("Make it a goal") {
+            tried = true
+            if (saved || n == null) return@SaveButton
+            saved = true
+            // Save after the hide: the dream leaves the list on save, which would drop this sheet mid-animation.
+            scope.launch { sheet.hide() }.invokeOnCompletion { onSave(n, unit); onDismiss() }
+        }
     }
 }
 
@@ -539,46 +641,39 @@ private fun ResolveSheet(
     var tried by rememberSaveable { mutableStateOf(false) }
     var saved by remember { mutableStateOf(false) } // blocks a double tap during the hide animation
 
-    LedgerSheet(sheet, onDismiss) {
-        Text(goal.title, style = MaterialTheme.typography.headlineMedium)
-        Row(Modifier.padding(top = 20.dp), horizontalArrangement = Arrangement.spacedBy(20.dp)) {
-            TextRadio("Achieved", achieved, scheme.secondary) { achieved = true }
-            TextRadio("Not achieved", !achieved, scheme.tertiary) { achieved = false }
+    RoundedSheet(sheet, onDismiss) {
+        Text(goal.title, style = MaterialTheme.typography.headlineSmall)
+        Row(Modifier.padding(top = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Choice("Achieved", achieved, scheme.secondary) { achieved = true }
+            Choice("Not achieved", !achieved, scheme.error) { achieved = false }
         }
-        LedgerField(
+        Field(
             if (achieved) "How did it go?" else "What got in the way?", note, { note = it },
             error = "A few words, at least".takeIf { tried && note.isBlank() },
             singleLine = false,
         )
-        TextButton(
-            onClick = {
-                tried = true
-                if (saved || note.isBlank()) return@TextButton
-                saved = true
-                // Save after the hide so the row doesn't flip (and drop this sheet) mid-animation.
-                scope.launch { sheet.hide() }.invokeOnCompletion { onSave(achieved, note.trim()); onDismiss() }
-            },
-            modifier = Modifier.align(Alignment.End).padding(top = 16.dp),
-        ) { Text("Close the entry", style = MaterialTheme.typography.titleMedium) }
+        SaveButton("Save") {
+            tried = true
+            if (saved || note.isBlank()) return@SaveButton
+            saved = true
+            // Save after the hide so the card doesn't flip (and drop this sheet) mid-animation.
+            scope.launch { sheet.hide() }.invokeOnCompletion { onSave(achieved, note.trim()); onDismiss() }
+        }
     }
 }
 
 @Composable
 private fun SetAgainDialog(goal: Goal, onDismiss: () -> Unit, onYes: () -> Unit) {
     val unit = goal.durationUnit!!.name.lowercase().let { if (goal.durationAmount == 1) it.dropLast(1) else it }
-    val shape = RoundedCornerShape(4.dp)
     AlertDialog(
         onDismissRequest = onDismiss,
-        // Hairline edge: in dark mode paper-on-dimmed-paper barely separates otherwise.
-        modifier = Modifier.border(Dp.Hairline, MaterialTheme.colorScheme.outline, shape),
-        shape = shape,
-        containerColor = MaterialTheme.colorScheme.background,
+        containerColor = MaterialTheme.colorScheme.surface,
         tonalElevation = 0.dp,
         title = { Text("Set this goal again?", style = MaterialTheme.typography.headlineSmall) },
         text = {
             Text(
                 "“${goal.title}” for another ${goal.durationAmount} $unit, starting today.",
-                style = MaterialTheme.typography.bodyLarge,
+                style = MaterialTheme.typography.bodyMedium,
             )
         },
         confirmButton = { TextButton({ onYes(); onDismiss() }) { Text("Yes, again") } },
@@ -586,44 +681,54 @@ private fun SetAgainDialog(goal: Goal, onDismiss: () -> Unit, onYes: () -> Unit)
     )
 }
 
-/** Underlined word as a radio option; unselected = faint ink. */
+/** Pill-shaped option; selected = tinted with [color]. */
 @Composable
-private fun TextRadio(label: String, selected: Boolean, color: Color = MaterialTheme.colorScheme.onSurface, onClick: () -> Unit) {
+private fun Choice(label: String, selected: Boolean, color: Color = MaterialTheme.colorScheme.primary, onClick: () -> Unit) {
+    val bg by animateColorAsState(if (selected) color.copy(alpha = 0.15f) else Color.Transparent, spring(), label = "choice")
     Text(
         label,
-        style = MaterialTheme.typography.bodyLarge,
+        style = MaterialTheme.typography.labelLarge,
         color = if (selected) color else MaterialTheme.colorScheme.onSurfaceVariant,
-        textDecoration = if (selected) TextDecoration.Underline else null,
-        modifier = Modifier.selectable(selected, role = Role.RadioButton, onClick = onClick),
+        modifier = Modifier
+            .clip(CircleShape)
+            .background(bg)
+            .border(1.dp, if (selected) Color.Transparent else MaterialTheme.colorScheme.outlineVariant, CircleShape)
+            .selectable(selected, role = Role.RadioButton, onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 8.dp),
     )
 }
 
-/** Paper bottom sheet: flat, 4dp top corners, hairline handle, scrolling column at the notebook margin. */
+@Composable
+private fun ColumnScope.SaveButton(label: String, onClick: () -> Unit) {
+    Button(onClick, shape = RoundedCornerShape(14.dp), modifier = Modifier.align(Alignment.End).padding(top = 20.dp)) { Text(label) }
+}
+
+/** Card-colored bottom sheet: large rounded top corners, small pill handle, scrolling column. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun LedgerSheet(sheet: SheetState, onDismiss: () -> Unit, content: @Composable ColumnScope.() -> Unit) {
+private fun RoundedSheet(sheet: SheetState, onDismiss: () -> Unit, content: @Composable ColumnScope.() -> Unit) {
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheet,
-        shape = RoundedCornerShape(topStart = 4.dp, topEnd = 4.dp),
-        containerColor = MaterialTheme.colorScheme.background,
+        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+        containerColor = MaterialTheme.colorScheme.surface,
         tonalElevation = 0.dp,
         dragHandle = {
-            Box(Modifier.padding(vertical = 14.dp).size(32.dp, 1.dp).background(MaterialTheme.colorScheme.outline))
+            Box(Modifier.padding(vertical = 12.dp).size(36.dp, 4.dp).clip(CircleShape).background(MaterialTheme.colorScheme.outlineVariant))
         },
     ) {
         Column(
             Modifier
                 .verticalScroll(rememberScrollState())
-                .padding(start = NotebookMargin, end = 24.dp, bottom = 16.dp),
+                .padding(start = 24.dp, end = 24.dp, bottom = 16.dp),
             content = content,
         )
     }
 }
 
-/** Ledger-style text field: label above, bare text, hairline rule below (vermilion when invalid). */
+/** Label above a soft rounded input (red edge + message when invalid). */
 @Composable
-private fun LedgerField(
+private fun Field(
     label: String,
     value: String,
     onValueChange: (String) -> Unit,
@@ -631,21 +736,27 @@ private fun LedgerField(
     error: String? = null,
     singleLine: Boolean = true,
     keyboardType: KeyboardType = KeyboardType.Text,
-    textStyle: TextStyle = MaterialTheme.typography.bodyLarge,
+    textStyle: TextStyle = MaterialTheme.typography.bodyMedium,
 ) {
     val scheme = MaterialTheme.colorScheme
-    Column(modifier.padding(top = 20.dp)) {
-        Text(label, style = MaterialTheme.typography.labelMedium, color = scheme.onSurfaceVariant)
+    val shape = RoundedCornerShape(12.dp)
+    Column(modifier.padding(top = 16.dp)) {
+        Text(label, style = MaterialTheme.typography.labelLarge, color = scheme.onSurfaceVariant, modifier = Modifier.padding(bottom = 6.dp))
         BasicTextField(
             value, onValueChange,
             singleLine = singleLine,
             minLines = if (singleLine) 1 else 3,
             textStyle = textStyle.copy(color = scheme.onSurface),
-            cursorBrush = SolidColor(scheme.onSurface),
+            cursorBrush = SolidColor(scheme.primary),
             keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences, keyboardType = keyboardType),
-            modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp).semantics { contentDescription = label },
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(shape)
+                .background(scheme.background)
+                .then(if (error != null) Modifier.border(1.dp, scheme.error, shape) else Modifier)
+                .padding(horizontal = 14.dp, vertical = 12.dp)
+                .semantics { contentDescription = label },
         )
-        HorizontalDivider(color = if (error != null) scheme.error else scheme.outline)
-        error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = scheme.error) }
+        error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = scheme.error, modifier = Modifier.padding(top = 4.dp)) }
     }
 }
