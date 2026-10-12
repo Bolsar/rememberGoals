@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.room.Dao
 import androidx.room.Database
 import androidx.room.Insert
+import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Room
 import androidx.room.RoomDatabase
@@ -13,7 +14,8 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface GoalDao {
-    @Query("SELECT * FROM Goal WHERE deadline IS NOT NULL AND draft = 0 ORDER BY createdAt DESC, id DESC")
+    /** Goals and drafts (the main list). Drafts never have a deadline, so `deadline IS NOT NULL` means a real goal. */
+    @Query("SELECT * FROM Goal WHERE deadline IS NOT NULL OR draft = 1 ORDER BY createdAt DESC, id DESC")
     fun goals(): Flow<List<Goal>>
 
     @Query("SELECT * FROM Goal WHERE deadline IS NULL AND draft = 0 ORDER BY createdAt DESC, id DESC")
@@ -24,6 +26,13 @@ interface GoalDao {
 
     @Insert
     suspend fun insert(goal: Goal): Long
+
+    /** Add Goal page only: a reopened draft (existing id) is overwritten in place; id 0 inserts. Returns the row id. */
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun save(goal: Goal): Long
+
+    @Query("DELETE FROM Goal WHERE id = :id AND draft = 1")
+    suspend fun deleteDraft(id: Long)
 
     // Targeted updates (not @Update of a UI snapshot): a stale row can't overwrite newer state, and the WHERE guards
     // make resolving an already-resolved goal or promoting a non-dream a no-op.

@@ -23,8 +23,33 @@ data class Goal(
     val status: Status = Status.ACTIVE,
     val note: String? = null,
     val resolvedAt: Long? = null,
-    @ColumnInfo(defaultValue = "0") val draft: Boolean = false, // unfinished Add Goal page (chunk 9); hidden from goals/dreams
+    @ColumnInfo(defaultValue = "0") val draft: Boolean = false, // Add Goal page left without "Add"; never has a deadline
 )
+
+/**
+ * What the Add Goal page writes. [id]: 0 for a new page, else the reopened draft (overwritten in place, no duplicate).
+ * [amount] is the raw digits field ("0" is dropped, the page blocks Add on it).
+ * - [draft] (page left without Add): whatever was typed, with no deadline and the draft's [createdAt] kept (it never
+ *   moves). null when nothing was typed: nothing to keep (and a reopened draft emptied this way is discarded).
+ * - Add: a goal with the deadline counted from [now], or a dream without a valid amount. createdAt = [now] (lands on top).
+ */
+fun pageGoal(
+    id: Long, createdAt: Long, title: String, description: String, amount: String, unit: DurationUnit, now: Long, draft: Boolean,
+): Goal? {
+    val n = amount.toIntOrNull()?.takeIf { it > 0 } // "0" counts as not typed
+    if (draft && title.isBlank() && description.isBlank() && n == null) return null
+    val deadline = if (!draft && n != null) deadlineFrom(now, n, unit) else null
+    return Goal(
+        id = id,
+        title = title.trim(),
+        description = description.trim().ifBlank { null },
+        durationAmount = n,
+        durationUnit = unit.takeIf { n != null },
+        deadline = deadline,
+        createdAt = if (draft) createdAt else now,
+        draft = draft,
+    )
+}
 
 /** Calendar-aware: +1 month from Jan 31 is Feb 28/29, days survive DST shifts. */
 fun deadlineFrom(start: Long, amount: Int, unit: DurationUnit, zone: ZoneId = ZoneId.systemDefault()): Long =
@@ -40,7 +65,10 @@ fun Goal.setAgainCopy(now: Long): Goal = copy(
     resolvedAt = null,
 )
 
-/** One row of the main list: a goal card (at createdAt, never moves) or an event about a goal (at the event time). */
+/**
+ * One row of the main list: a goal card (at createdAt, never moves; a draft is a card too, with no events) or an event
+ * about a goal (at the event time).
+ */
 sealed interface Entry {
     val goal: Goal
     val time: Long

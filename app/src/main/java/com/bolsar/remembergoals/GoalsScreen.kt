@@ -3,6 +3,17 @@ package com.bolsar.remembergoals
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animate
@@ -44,6 +55,7 @@ import androidx.compose.material3.FloatingActionButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.SheetState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -125,7 +137,8 @@ fun GoalsScreen(
     val goals by vm.goals.collectAsState() // null = not loaded yet (no empty-state flash)
     val loadedDreams by vm.dreams.collectAsState()
     val dreams = loadedDreams.orEmpty()
-    var adding by rememberSaveable { mutableStateOf(false) }
+    // Add Goal page: null = closed, 0 = new, else the draft id being completed.
+    var page by rememberSaveable { mutableStateOf<Long?>(null) }
     // Ids, not Goal objects: saveable, and the lookup below always reads the fresh row.
     var resolvingId by rememberSaveable { mutableStateOf<Long?>(null) }
     var resolvingAchieved by rememberSaveable { mutableStateOf(true) }
@@ -133,7 +146,7 @@ fun GoalsScreen(
     var promotingId by rememberSaveable { mutableStateOf<Long?>(null) }
     LaunchedEffect(resolve) { // null never closes an open sheet
         resolve?.let { (id, achieved) ->
-            adding = false; promotingId = null // never stack two sheets
+            promotingId = null // never stack two sheets (the resolve sheet may open over the Add Goal page)
             resolvingId = id; resolvingAchieved = achieved; onResolveHandled()
         }
     }
@@ -209,7 +222,7 @@ fun GoalsScreen(
         snapshotFlow { loadedDreams?.isEmpty() }.drop(1).collect { if (it == true && dreamsOpen) settle(false) }
     }
 
-    val showReminders = remindersOff && goals.orEmpty().any { it.status == Status.ACTIVE }
+    val showReminders = remindersOff && goals.orEmpty().any { it.status == Status.ACTIVE && !it.draft }
     val showEmpty = goals?.isEmpty() == true && loadedDreams != null
     // Lazy items emitted before the timeline (keep in sync with the LazyColumn below): "dreams", "reminders", "empty".
     val head = 1 + (if (showReminders) 1 else 0) + (if (showEmpty) 1 else 0)
@@ -228,66 +241,83 @@ fun GoalsScreen(
         }
     }
 
-    Scaffold(
-        containerColor = MaterialTheme.colorScheme.background,
-        topBar = {
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .background(MaterialTheme.colorScheme.background) // cards scroll under the title, so hide them
-                    .statusBarsPadding()
-                    .padding(start = Gutter + 4.dp, end = Gutter + 4.dp, top = 20.dp, bottom = 12.dp),
-            ) {
-                Text("Goals", style = MaterialTheme.typography.headlineLarge, modifier = Modifier.weight(1f).alignByBaseline())
-                if (dreams.isNotEmpty() && !dreamsOpen) {
-                    Text(
-                        "↓ ${dreams.size} dream${if (dreams.size == 1) "" else "s"}",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.alignByBaseline().clickable(onClickLabel = "Show dreams") { openDreams() },
-                    )
-                }
-            }
+    // The list and the Add Goal page swap: the page slides up + fades in over the list, and back down when it closes.
+    AnimatedContent(
+        page,
+        transitionSpec = {
+            val slide = spring<IntOffset>(stiffness = Spring.StiffnessMediumLow)
+            if (targetState != null) (slideInVertically(slide) { it / 4 } + fadeIn()) togetherWith fadeOut()
+            else (fadeIn() togetherWith slideOutVertically(slide) { it / 4 } + fadeOut()).apply { targetContentZIndex = -1f }
         },
-        floatingActionButton = { AddFab { adding = true } },
-    ) { padding ->
-        LazyColumn(
-            state = list,
-            contentPadding = PaddingValues(top = padding.calculateTopPadding(), bottom = padding.calculateBottomPadding() + 96.dp),
-            modifier = Modifier.fillMaxSize().nestedScroll(reveal), // full height: an empty list must still take the pull
-        ) {
-            item(key = "dreams") {
-                // Shows `pull` px (or all when open) of the section, bottom edge first, as if it slid out from under the title.
-                Box(
+        label = "page",
+    ) { shown ->
+        if (shown != null) {
+            AddGoalPage(shown, draft = goals?.find { it.id == shown && it.draft }) { vm.savePage(shown, it); page = null }
+            return@AnimatedContent
+        }
+        // Ignore taps while the page is still animating out: the same id would revive that closed page's composition.
+        fun open(id: Long) { if (!transition.isRunning) page = id }
+        Scaffold(
+            containerColor = MaterialTheme.colorScheme.background,
+            topBar = {
+                Row(
                     Modifier
-                        .clipToBounds()
-                        .layout { m, c ->
-                            val p = m.measure(c)
-                            dreamsHeight = p.height.toFloat()
-                            val h = if (dreamsOpen) p.height else pull.roundToInt().coerceIn(0, p.height)
-                            layout(p.width, h) { p.place(0, h - p.height) }
-                        }
-                        .then(if (dreamsOpen) Modifier else Modifier.clearAndSetSemantics {}), // folded = not there for TalkBack
+                        .fillMaxWidth()
+                        .background(MaterialTheme.colorScheme.background) // cards scroll under the title, so hide them
+                        .statusBarsPadding()
+                        .padding(start = Gutter + 4.dp, end = Gutter + 4.dp, top = 20.dp, bottom = 12.dp),
                 ) {
-                    DreamsSection(dreams, onCollapse = { settle(false) }, onPromote = { promotingId = it.id })
+                    Text("Goals", style = MaterialTheme.typography.headlineLarge, modifier = Modifier.weight(1f).alignByBaseline())
+                    if (dreams.isNotEmpty() && !dreamsOpen) {
+                        Text(
+                            "↓ ${dreams.size} dream${if (dreams.size == 1) "" else "s"}",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.alignByBaseline().clickable(onClickLabel = "Show dreams") { openDreams() },
+                        )
+                    }
                 }
-            }
-            if (showReminders) item(key = "reminders") { RemindersOffLine() }
-            if (showEmpty) item(key = "empty") { EmptyState(hasDreams = dreams.isNotEmpty()) }
-            items(entries, key = { it.key }) { entry ->
-                Box(Modifier.animateItem().padding(horizontal = Gutter, vertical = 5.dp)) { // spring fade + placement
-                    when (entry) {
-                        is GoalCard -> GoalCardView(entry.goal, now, highlighted == entry.goal.id) {
-                            resolvingId = entry.goal.id; resolvingAchieved = true
+            },
+            floatingActionButton = {
+                AddFab(Modifier.animateEnterExit(enter = scaleIn(spring(Spring.DampingRatioMediumBouncy)), exit = scaleOut())) { open(0L) }
+            },
+        ) { padding ->
+            LazyColumn(
+                state = list,
+                contentPadding = PaddingValues(top = padding.calculateTopPadding(), bottom = padding.calculateBottomPadding() + 96.dp),
+                modifier = Modifier.fillMaxSize().nestedScroll(reveal), // full height: an empty list must still take the pull
+            ) {
+                item(key = "dreams") {
+                    // Shows `pull` px (or all when open) of the section, bottom edge first, as if it slid out from under the title.
+                    Box(
+                        Modifier
+                            .clipToBounds()
+                            .layout { m, c ->
+                                val p = m.measure(c)
+                                dreamsHeight = p.height.toFloat()
+                                val h = if (dreamsOpen) p.height else pull.roundToInt().coerceIn(0, p.height)
+                                layout(p.width, h) { p.place(0, h - p.height) }
+                            }
+                            .then(if (dreamsOpen) Modifier else Modifier.clearAndSetSemantics {}), // folded = not there for TalkBack
+                    ) {
+                        DreamsSection(dreams, onCollapse = { settle(false) }, onPromote = { promotingId = it.id })
+                    }
+                }
+                if (showReminders) item(key = "reminders") { RemindersOffLine() }
+                if (showEmpty) item(key = "empty") { EmptyState(hasDreams = dreams.isNotEmpty()) }
+                items(entries, key = { it.key }) { entry ->
+                    Box(Modifier.animateItem().padding(horizontal = Gutter, vertical = 5.dp)) { // spring fade + placement
+                        when (entry) {
+                            is GoalCard -> if (entry.goal.draft) DraftCardView(entry.goal) { open(entry.goal.id) }
+                            else GoalCardView(entry.goal, now, highlighted == entry.goal.id) {
+                                resolvingId = entry.goal.id; resolvingAchieved = true
+                            }
+                            is GoalEvent -> EventRow(entry) { showGoal(entry.goal) }
                         }
-                        is GoalEvent -> EventRow(entry) { showGoal(entry.goal) }
                     }
                 }
             }
         }
-    }
-    if (adding) {
-        AddGoalSheet(onDismiss = { adding = false }, onSave = vm::addGoal)
     }
     // ponytail: null until the first DB emission or if the goal is gone / already resolved, so nothing shows.
     goals?.find { it.id == resolvingId && it.status == Status.ACTIVE }?.let { goal ->
@@ -473,13 +503,13 @@ private fun TickBox(status: Status, overdue: Boolean, onClick: (() -> Unit)?) {
 }
 
 @Composable
-private fun AddFab(onClick: () -> Unit) {
+private fun AddFab(modifier: Modifier, onClick: () -> Unit) {
     FloatingActionButton(
         onClick = onClick,
         containerColor = MaterialTheme.colorScheme.primary,
         contentColor = MaterialTheme.colorScheme.onPrimary,
         elevation = FloatingActionButtonDefaults.elevation(0.dp, 0.dp, 0.dp, 0.dp),
-        modifier = Modifier.semantics { contentDescription = "Add goal" },
+        modifier = modifier.semantics { contentDescription = "Add goal" },
     ) {
         val ink = MaterialTheme.colorScheme.onPrimary
         Canvas(Modifier.size(18.dp)) {
@@ -490,38 +520,110 @@ private fun AddFab(onClick: () -> Unit) {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+/** Unfinished Add Goal page: draft surface, whatever was typed, and a badge. Tap to reopen the page prefilled. */
 @Composable
-private fun AddGoalSheet(onDismiss: () -> Unit, onSave: (String, String?, Int?, DurationUnit?) -> Unit) {
-    val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    val scope = rememberCoroutineScope()
-    var title by rememberSaveable { mutableStateOf("") }
-    var amount by rememberSaveable { mutableStateOf("") }
-    var unit by rememberSaveable { mutableStateOf(DurationUnit.DAYS) }
-    var description by rememberSaveable { mutableStateOf("") }
-    var tried by rememberSaveable { mutableStateOf(false) }
-    var saved by remember { mutableStateOf(false) } // blocks a double tap during the hide animation
-    val n = amount.toIntOrNull() // digits-only, max 3 chars => null or 0..999
-    val titleError = tried && title.isBlank()
-    val amountError = n == 0
-
-    RoundedSheet(sheet, onDismiss) {
-        Text("New goal", style = MaterialTheme.typography.headlineSmall)
-        Field(
-            "Name", title, { title = it },
-            error = "A goal needs a name".takeIf { titleError },
-            textStyle = MaterialTheme.typography.titleMedium,
+private fun DraftCardView(goal: Goal, onClick: () -> Unit) {
+    val scheme = MaterialTheme.colorScheme
+    val muted = mutedOn(true)
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(CardShape)
+            .background(scheme.primaryContainer)
+            .clickable(onClickLabel = "Complete the goal", onClick = onClick)
+            .padding(16.dp),
+    ) {
+        Text(
+            goal.title.ifBlank { "Untitled" },
+            style = MaterialTheme.typography.titleMedium,
+            color = if (goal.title.isBlank()) muted else scheme.onSurface,
         )
-        DurationFields(amount, { amount = it }, unit, { unit = it }, amountError, emptyHint = "No duration — saved as a dream")
-        Field("Description", description, { description = it }, singleLine = false)
-        SaveButton("Add goal") {
-            tried = true
-            if (saved || title.isBlank() || amountError) return@SaveButton
-            saved = true
-            onSave(title.trim(), description.trim().ifBlank { null }, n, unit.takeIf { n != null })
-            scope.launch { sheet.hide() }.invokeOnCompletion { onDismiss() }
+        val meta = goal.durationAmount?.let { "For $it ${goal.durationUnit!!.name.lowercase()}" } ?: goal.description
+        meta?.let {
+            Text(it, style = MaterialTheme.typography.labelLarge, color = muted, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp))
         }
+        Text(
+            "Complete the goal",
+            style = MaterialTheme.typography.labelLarge,
+            modifier = Modifier // ink on a draft-tinted pill: the draft purple as text is ~3:1, below AA
+                .padding(top = 10.dp)
+                .clip(CircleShape)
+                .background(scheme.onPrimaryContainer.copy(alpha = 0.2f))
+                .padding(horizontal = 10.dp, vertical = 5.dp),
+        )
     }
+}
+
+/**
+ * Full Add Goal page. [id] 0 = new, else [draft] reopened (it prefills the fields once; after that the saveable fields
+ * win, also across rotation and process death). Add => [onClose] with a goal/dream; back (system or arrow) => a draft,
+ * or null when nothing was typed. See [pageGoal].
+ */
+@Composable
+private fun AddGoalPage(id: Long, draft: Goal?, onClose: (Goal?) -> Unit) {
+    var title by rememberSaveable { mutableStateOf(draft?.title.orEmpty()) }
+    var amount by rememberSaveable { mutableStateOf(draft?.durationAmount?.toString().orEmpty()) }
+    var unit by rememberSaveable { mutableStateOf(draft?.durationUnit ?: DurationUnit.DAYS) }
+    var description by rememberSaveable { mutableStateOf(draft?.description.orEmpty()) }
+    val createdAt = rememberSaveable { draft?.createdAt ?: System.currentTimeMillis() }
+    var tried by rememberSaveable { mutableStateOf(false) }
+    var closed by remember { mutableStateOf(false) } // closes once: Add / back during the exit animation do nothing
+    val amountError = amount.toIntOrNull() == 0 // digits-only, max 3 chars => null or 0..999
+    fun close(add: Boolean) {
+        if (closed) return
+        closed = true
+        onClose(pageGoal(id, createdAt, title, description, amount, unit, System.currentTimeMillis(), draft = !add))
+    }
+    BackHandler(!closed) { close(add = false) }
+
+    val scheme = MaterialTheme.colorScheme
+    Surface(color = scheme.background) { Column(Modifier.fillMaxSize().safeDrawingPadding()) { // Surface: ink text color
+        Row(Modifier.fillMaxWidth().padding(start = 4.dp, end = Gutter, top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier.size(48.dp).clip(CircleShape).clickable { close(add = false) }.semantics { contentDescription = "Back" },
+                contentAlignment = Alignment.Center,
+            ) {
+                val ink = scheme.onSurface
+                Canvas(Modifier.size(18.dp)) { // hand-drawn "←", like the FAB's "+"
+                    val w = 2.dp.toPx()
+                    val y = size.height / 2
+                    drawLine(ink, Offset(size.width, y), Offset(0f, y), w, StrokeCap.Round)
+                    drawLine(ink, Offset(0f, y), Offset(y, 0f), w, StrokeCap.Round)
+                    drawLine(ink, Offset(0f, y), Offset(y, size.height), w, StrokeCap.Round)
+                }
+            }
+            Box(Modifier.weight(1f))
+            Button(
+                {
+                    tried = true
+                    if (title.isNotBlank() && !amountError) close(add = true)
+                },
+                shape = RoundedCornerShape(14.dp),
+            ) { Text("Add") }
+        }
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = Gutter, vertical = 12.dp)) {
+            Text(
+                if (id == 0L) "New goal" else "Complete the goal",
+                style = MaterialTheme.typography.headlineLarge,
+                modifier = Modifier.padding(start = 4.dp, bottom = 16.dp),
+            )
+            Column(Modifier.fillMaxWidth().clip(CardShape).background(scheme.surface).padding(start = 12.dp, end = 12.dp, bottom = 16.dp)) {
+                Field(
+                    "Name", title, { title = it },
+                    error = "A goal needs a name".takeIf { tried && title.isBlank() },
+                    textStyle = MaterialTheme.typography.titleMedium,
+                )
+                DurationFields(amount, { amount = it }, unit, { unit = it }, amountError, emptyHint = "No duration — saved as a dream")
+                Field("Description", description, { description = it }, singleLine = false)
+            }
+            Text(
+                "Leave without adding and it stays here as a draft.",
+                style = MaterialTheme.typography.labelLarge,
+                color = scheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 4.dp, top = 12.dp),
+            )
+        }
+    } }
 }
 
 /** Amount (digits only, max 3) + days/weeks/months, then a line: the due-date preview, or [emptyHint] if no valid amount. */
@@ -538,7 +640,7 @@ private fun DurationFields(
     Row(verticalAlignment = Alignment.Bottom) {
         Field(
             "For", amount, { onAmount(it.filter(Char::isDigit).take(3)) },
-            modifier = Modifier.width(80.dp),
+            modifier = Modifier.width(72.dp),
             error = "1–999".takeIf { error },
             keyboardType = KeyboardType.Number,
         )
@@ -694,7 +796,8 @@ private fun Choice(label: String, selected: Boolean, color: Color = MaterialThem
             .background(bg)
             .border(1.dp, if (selected) Color.Transparent else MaterialTheme.colorScheme.outlineVariant, CircleShape)
             .selectable(selected, role = Role.RadioButton, onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 8.dp),
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        maxLines = 1,
     )
 }
 

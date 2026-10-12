@@ -744,3 +744,85 @@ restyled. Dreams pull-reveal still works.
 - Chunk 11: new app icon (the launcher still has the v1 ink tick on the new background color), README screenshots.
 - The highlight color is the status surface mixed with blue, which looks greyish on orange cards. Acceptable.
 - The event row shows only the date (no time of day).
+
+## Chunk 9 — v2-add-page-drafts
+
+**What changed**: `+` opens a full Add Goal page instead of a bottom sheet. Leaving the page without tapping Add saves a
+draft, as long as something was typed. Drafts are purple cards in the main list with a "Complete the goal" badge.
+Tapping one reopens the page prefilled. Add turns it into a goal or a dream, in place (same row, no duplicate).
+
+**Files**
+- `Goal.kt`: `pageGoal(id, createdAt, title, description, amount, unit, now, draft): Goal?` (pure) builds the row the
+  page writes. It trims the text, drops a blank description and drops an amount of `"0"`.
+  - Draft: no deadline, and the draft keeps its `createdAt`, so it never moves. Unit only when there is an amount.
+    Returns null when nothing was typed (title, description and amount all empty).
+  - Add: a goal (deadline from `now`) or a dream (no valid amount), with `createdAt = now`, so it lands on top.
+  `GoalCard` doc: a draft is a card with no events. `timeline()` itself is unchanged: drafts have no
+  deadline or `resolvedAt`, so they never produce events.
+- `AppDb.kt`: `goals()` = `deadline IS NOT NULL OR draft = 1` (goals + drafts, one Flow, so the empty state and the
+  `head` count need no change). `save(goal)` = `@Insert(REPLACE)`, used by the page only. A reopened draft id is
+  overwritten in place, and plain `insert` stays strict. `deleteDraft(id)` has a `draft = 1` guard.
+- `GoalsViewModel.kt`: `addGoal` replaced by `savePage(id, goal: Goal?)`. A goal or draft is saved, and reminders are
+  scheduled when it has a deadline. `null` with a draft id deletes that draft. `null` on a new page (id 0) does nothing.
+- `GoalsScreen.kt`:
+  - `page: Long?` (rememberSaveable): null = list, 0 = new page, else the id of the draft being completed.
+    `AnimatedContent(page)` swaps the list and the page. Opening: the page slides up (1/4 height, spring) and fades in.
+    Closing: it slides down and fades out, drawn above the list (`targetContentZIndex = -1`).
+    `open(id)` ignores taps while the transition runs. Re-opening the same id mid-exit would otherwise revive the
+    closing page (`closed = true`).
+  - FAB: `Modifier.animateEnterExit(scaleIn(bouncy spring), scaleOut())`, so it scales out and back in with the page.
+  - `AddGoalPage(id, draft, onClose)`: `Surface` (needed for the ink text color in dark mode) +
+    `safeDrawingPadding()` (status/nav bars + IME). Top row: hand-drawn "←" (48dp, content description "Back") and
+    a filled "Add" button. Then the "New goal" / "Complete the goal" heading, the fields on a 20dp card, and a hint line
+    ("Leave without adding and it stays here as a draft."). The fields are rememberSaveable and seeded from `draft`
+    once, and `createdAt` is saveable too. So rotation and process death restore the page, and the restored page still
+    writes to the same draft id. A `closed` flag means it closes only once (Add, back arrow, system back via
+    `BackHandler(!closed)`). Validation as before: name required, amount `0` is an error.
+  - `DraftCardView`: `primaryContainer` card, title (or a muted "Untitled"), meta (`For 3 months` or the description),
+    and a "Complete the goal" pill. The pill is ink text on `onPrimaryContainer` at 20%, because the draft purple as
+    text is ~3:1, below AA. Tapping the card opens the page.
+  - `AddGoalSheet` deleted. `DurationFields`: amount field 72dp. `Choice`: 12dp padding and `maxLines = 1`, so
+    "months" no longer wraps on a 360dp screen.
+  - The reminders-off line ignores drafts (they are ACTIVE by default).
+- `app/src/test/.../PageGoalTest.kt`: covers "nothing typed => no draft (and a reopened draft emptied => discard)",
+  "draft keeps text, id and createdAt", "Add with amount => goal from now", "Add without amount => dream", "`0` dropped",
+  and "draft = one card, no events".
+
+**Decisions**
+- Discard a draft by emptying all its fields and leaving. No confirmation or undo (minimal; there is no delete
+  elsewhere either).
+- A completed draft gets `createdAt = now` and jumps to the top like any new goal. "Never moves" covers drafts while
+  they stay drafts: editing one keeps its place.
+- Backgrounding relies on saved instance state (rememberSaveable), which also covers process death (verified).
+  ponytail: the page is not written to the DB on `ON_STOP`, so swiping the app away from Recents with the page open
+  loses the typed text. If that matters, save a draft on `ON_STOP` and feed the returned id back into the page.
+- A notification tap while the page is open shows the resolve sheet over the page. The page is no longer closed: v1
+  dropped the unsaved Add sheet, and keeping the page is safer for the user's text.
+- The draft lookup for prefill (`goals.find`) only runs on a tap, so the list is already loaded. A future deep link
+  into a draft would have to wait for `goals` first.
+
+**Review fixes** (`ponytail:ponytail-review`: one shrink; `code-review` medium: 9 findings)
+- ponytail: `spring(visibilityThreshold = IntOffset.VisibilityThreshold)` -> `spring<IntOffset>()`.
+- Fixed: re-opening the same page id during the exit animation revived a closed, dead page -> `open()` ignores taps
+  while the transition runs.
+- Fixed: REPLACE on the shared `insert` (setAgain could have overwritten a row silently) -> a separate page-only `save`.
+- Fixed: a draft kept amount `0` ("For 0 days", error on reopen) -> `0` is dropped.
+- Fixed: `deleteDraft(0)` ran for every empty new page -> skipped. `assertNull` in the test.
+- Skipped (see Decisions): Recents-swipe loss, discard without confirmation, the resolve sheet over the page, the
+  pre-load lookup.
+- Found on the emulator: the page title was black in dark mode (no `Surface`, default content color) -> `Surface`.
+
+**Verified on emulator** (Small_Phone API 37, light + dark): open the page (slide up), type name + 3 months, system back
+=> purple draft card on top with "For 3 months" + badge. Tap it => "Complete the goal" page prefilled. Rotation
+keeps the fields. Leave with the arrow => still one draft. Reopen + Add => a normal goal ("Due 12 Jan 2027 · 92d left"),
+no duplicate, no draft left. Nothing typed + back => nothing saved. Description only => "Untitled" draft. Add with no
+name => "A goal needs a name". Emptying a draft + back => deleted. Name only + Add => a dream (dream count +1). Killing
+the process with a reopened draft page in the background => the page comes back with its text, and leaving updates
+the same draft. A quick FAB tap during the close animation is ignored, and the next tap opens a fresh page.
+
+**Known issues / for chunk 10**
+- Chunk 10 (Telegram archive) is unaffected: drafts are in `goals`, never in `dreams`. `head` is still
+  "dreams" + "reminders" + "empty". Keep it in sync if the archive item becomes conditional.
+- Swiping the app from Recents with the page open loses the unsaved text (see Decisions).
+- Drafts have no swipe-to-delete; emptying the fields is the only way to discard one.
+- The emulator DB has test drafts ("Killed", "Quick") and goals ("Zebra", dream "Sail") from this chunk's walkthrough.
