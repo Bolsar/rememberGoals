@@ -7,17 +7,18 @@ import android.provider.Settings
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.LocalActivity
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.updateTransition
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.Canvas
@@ -195,15 +196,16 @@ fun GoalsScreen(
         }
     }
 
-    // The list and the Add Goal page swap: the page slides up + fades in over the list, and back down when it closes.
-    AnimatedContent(
-        page,
+    // Stack navigation: a page pushes in from the right over the list (which slides a quarter left, parallax) and pops
+    // back out to the right, the list returning underneath.
+    // One parent transition: it runs until the leaving page's exit is done too (each content's own `transition` doesn't).
+    val pages = updateTransition(page, label = "page")
+    pages.AnimatedContent(
         transitionSpec = {
-            val slide = spring<IntOffset>(stiffness = Spring.StiffnessMediumLow)
-            if (targetState != null) (slideInVertically(slide) { it / 4 } + fadeIn()) togetherWith fadeOut()
-            else (fadeIn() togetherWith slideOutVertically(slide) { it / 4 } + fadeOut()).apply { targetContentZIndex = -1f }
+            val slide = tween<IntOffset>(320, easing = FastOutSlowInEasing)
+            if (targetState != null) slideInHorizontally(slide) { it } togetherWith slideOutHorizontally(slide) { -it / 4 }
+            else (slideInHorizontally(slide) { -it / 4 } togetherWith slideOutHorizontally(slide) { it }).apply { targetContentZIndex = -1f }
         },
-        label = "page",
     ) { shown ->
         if (shown == DREAMS_PAGE) {
             DreamsPage(dreams, onBack = { page = null }, onPromote = { promotingId = it.id })
@@ -213,8 +215,10 @@ fun GoalsScreen(
             AddGoalPage(shown, goal = goals?.find { it.id == shown }, onSave = vm::savePage, onEdit = vm::edit) { page = null }
             return@AnimatedContent
         }
-        // Ignore taps while the page is still animating out: the same id would revive that closed page's composition.
-        fun open(id: Long) { if (!transition.isRunning) page = id }
+        // Ignore taps until the page has fully animated out: reopening the same id mid-exit would revive that closed
+        // page's composition (its `closed` flag set: dead back arrow, system back quits the app). The list's own enter
+        // `transition` ends before the page's slide-out, so it must be the parent [pages].
+        fun open(id: Long) { if (!pages.isRunning) page = id }
         Scaffold(
             containerColor = MaterialTheme.colorScheme.background,
             topBar = {

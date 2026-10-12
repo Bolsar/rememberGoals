@@ -1055,3 +1055,17 @@ Tap an ACTIVE goal card (incl. overdue) to open the Add Goal page in edit mode (
 - Back (or backgrounding) discards the edit: no draft for an existing goal. Resolved goals are final (not tappable).
 - Dreams are not edited here (they keep Promote).
 Verified on emulator: prefill, empty-duration error, save keeps position + new due date, back discards.
+
+## Fix — page freeze on quick reopen + stack navigation
+
+**Bug** (user report): open Dreams page, close, repeat; page froze (dead back arrow) and system back quit the app.
+Root cause: the open guard read `transition` inside `AnimatedContent`'s content lambda, i.e. the *list's own* enter
+animation, which ends before the leaving page's exit. A tap in that gap (~0.45s after back on the emulator) reopened the
+same page key, so `AnimatedContent` revived the still-exiting page composition with `closed = true`: BackHandler off,
+arrow no-op, back fell through to the activity. Fix: `updateTransition(page)` + `pages.AnimatedContent`, guard on the
+parent `pages.isRunning` (covers every child enter/exit). Same guard protects the Add Goal / edit page.
+Reproduced before and swept 0.1–1.0s gaps after: no stuck page, app never quits.
+
+**Stack style** (user request): pages push in from the right over the list (list slides a quarter left, parallax) and
+pop out to the right; `tween(320, FastOutSlowInEasing)` instead of the vertical slide + fade. The shorter exit also
+shrinks the ignored-tap window to ~0.35s.
