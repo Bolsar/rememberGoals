@@ -195,3 +195,72 @@ JUnit 4.13.2. compileSdk = targetSdk = 37 (highest installed: `android-37.0`), m
   `getById` (chunk 6 needs it; task asked for it), merging the two Flows into one query (negligible cost).
 - Note: first `code-review` run saw nothing because changes were staged; run it on unstaged/`git add -N` changes or a
   committed branch.
+
+## Chunk 3 — list-add
+
+**What changed**: Main ledger list and the Add Goal bottom sheet. `MainActivity` now does only
+`setContent { RememberGoalsTheme { GoalsScreen() } }`. The Scaffold, title and FAB moved into `GoalsScreen`.
+
+**Files**
+- `app/src/main/java/com/bolsar/remembergoals/GoalsScreen.kt` (new, all UI, flat, private composables):
+  - `GoalsScreen(vm = viewModel())`: `Scaffold` (topBar = big serif "Goals" at `NotebookMargin`; FAB = `AddFab`).
+    The `LazyColumn` has a hairline at the top, then `items(goals, key = id)` -> `GoalRow`. `adding` flag (rememberSaveable)
+    shows `AddGoalSheet(onDismiss, onSave = vm::addGoal)`.
+  - `GoalRow(goal, onTick)`: serif `titleLarge` title (faded when resolved). Mono meta line: ACTIVE `due 2 Nov 2026 · 21d left`
+    (`due today` / `3d over`); ACHIEVED `achieved <date>` + ` · early` when the resolved day < deadline day; FAILED
+    `failed <date>`. Optional description (body, faded, 2 lines) and note (italic serif, in quotes). Hairline divider below.
+    **No cards.**
+  - `TickBox(status, onClick)`: 48dp touch target, 20dp Canvas square. ACTIVE = ink outline; ACHIEVED = olive fill + check;
+    FAILED = vermilion fill + X. `toggleable(enabled = status == ACTIVE, role = Checkbox)`, so resolved boxes ignore taps.
+  - `AddFab`: vermilion, `RoundedCornerShape(4.dp)`, zero elevation, stroke-drawn 1.5dp "+".
+  - `AddGoalSheet`: `ModalBottomSheet` (paper, 4dp top corners, tonalElevation 0, hairline drag handle,
+    `skipPartiallyExpanded`). Its content Column has `verticalScroll`. Fields: Name (serif `titleLarge`); "For" amount
+    (digits only, max 3 chars) + unit text-radios days/weeks/months (selected = ink + underline, default DAYS); a mono hint
+    line: `No duration — saved as a dream` when the amount is empty, else a `due <date>` preview; Description (multiline).
+    Save = text button "Write it down".
+  - `LedgerField`: `BasicTextField` with a label above and a hairline below. The hairline turns vermilion and an error line
+    shows when invalid.
+  - Helpers: `day(millis): LocalDate` (system zone), `dateFormat` = `d MMM yyyy`.
+
+**Validation (UI owns it, per chunk 2)**
+- Name: trimmed; blank -> "A goal needs a name", shown after the first save attempt.
+- Amount: empty -> dream (amount and unit both passed as null); `0` -> "1–999" error. The digit filter + `take(3)` caps it at 999.
+- Description: trimmed; blank -> null.
+- Double-tap guard: a `saved` flag blocks a second `onSave` while the sheet hides.
+
+**Decisions**
+- Bottom sheet (not a full-screen dialog). Don't add `imePadding()` inside it: M3 `ModalBottomSheet` already applies IME
+  insets (checked on the emulator; adding it double-pads).
+- Unit is always selected (default DAYS), so "dream" just means the amount is empty.
+- No empty state for now: `goals` StateFlow starts as `emptyList()`, so an empty-state text flashes on every cold start.
+  Chunk 7: add one only after the first DB emission (e.g. make the initial value `null`).
+- `collectAsState` (not `...WithLifecycle`): no `lifecycle-runtime-compose` dep. Fine for one screen.
+
+**Verified on emulator** (Small_Phone AVD, light + dark): list rows, all three tick states (checked with a temporary
+resolve hack, which has been reverted), the name error, the dream hint and due preview, dreams hidden from the list,
+keyboard + sheet scrolling.
+
+**Known issues / deferred**
+- The countdown uses `LocalDate.now()` at composition, so it goes stale if the app stays open past midnight (refreshes on
+  the next recomposition). Same for the sheet's due preview (the real deadline is computed at save time).
+- Saving a dream closes the sheet, and nothing visible changes until chunk 5 adds the dreams section. The hint
+  "No duration — saved as a dream" is the only cue.
+- Lint: only the expected `NewerVersionAvailable` / `AndroidGradlePluginVersion` / `MissingApplicationIcon` warnings.
+
+**For chunk 4 (resolve flow)**
+- Tick hook: in `GoalsScreen`, `GoalRow(goal, onTick = { /* chunk 4: resolve flow */ })`. Replace it with e.g.
+  `resolving = goal` state and show your note dialog. `onTick` only fires for ACTIVE goals, because `TickBox` disables
+  itself otherwise.
+- Reuse `LedgerField` (label, value, onValueChange, error, singleLine = false) for the required note field, and the
+  `ModalBottomSheet` styling from `AddGoalSheet` (or a `Dialog` styled the same way: paper, 4dp corners, no elevation).
+- The row already renders `note`, `resolvedAt`, "early", and the olive/vermilion boxes. Nothing to change there.
+
+**Review fixes** (`ponytail:ponytail-review` + `code-review` medium, 9 findings)
+- ponytail: `onSave` forwarding lambda -> `vm::addGoal`; dropped the default `verticalAlignment = Top`.
+- Fixed: a double tap on save inserted two goals -> `saved` guard.
+- Fixed: empty-state flash on cold start -> removed the empty state (deferred to chunk 7, see Decisions).
+- Fixed: "early" compared exact millis (done on the due day still counted as early) -> compares days.
+- Fixed: tick box looked tappable on resolved rows and had no checked state -> `toggleable`, enabled only for ACTIVE.
+- Fixed: `imePadding()` double-counted IME insets -> removed.
+- Skipped (documented above): midnight staleness, preview vs. save-time `now`, invisible dream save (chunk 5),
+  `collectAsStateWithLifecycle`.
