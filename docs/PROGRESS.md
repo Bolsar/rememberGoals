@@ -143,3 +143,55 @@ JUnit 4.13.2. compileSdk = targetSdk = 37 (highest installed: `android-37.0`), m
 - `Mono`: dropped explicit `FontVariation.Settings(weight(400))` — Compose already maps `weight` to the wght axis.
 - `Theme.kt`: inlined one-use `hairline` local; removed unused `dark` param from `RememberGoalsTheme` (it reads
   `isSystemInDarkTheme()` directly — add a param back only if a preview/test needs to force a mode).
+
+## Chunk 2 — data-layer
+
+**What changed**: Room data layer + ViewModel. No UI changes (MainActivity untouched).
+
+**Files** (all in `app/src/main/java/com/bolsar/remembergoals/`, flat)
+- `Goal.kt` — `@Entity Goal` (table name `Goal`, fields per Data model), `enum Status { ACTIVE, ACHIEVED, FAILED }`,
+  `enum DurationUnit(val chrono: ChronoUnit) { DAYS, WEEKS, MONTHS }` (Room stores enums by name, no TypeConverters).
+  Pure functions: `deadlineFrom(start, amount, unit, zone = systemDefault)` (java.time `ZonedDateTime.plus`, so months
+  clamp Jan 31 -> Feb 28 and days keep wall-clock time across DST) and `Goal.setAgainCopy(now)` (id 0, ACTIVE,
+  createdAt = now, deadline = now + same duration, note/resolvedAt null; title/description/duration kept; throws if
+  called on a dream).
+- `AppDb.kt` — `GoalDao` (`goals()` / `dreams()` Flows ordered `createdAt DESC, id DESC`; `getById` suspend; `insert`
+  returns id; targeted `resolve(id, status, note, resolvedAt)` (only hits ACTIVE goals) and
+  `promote(id, amount, unit, deadline, now)` (only hits dreams) UPDATE queries; no generic `@Update`) and `AppDb` (`version = 1`, `exportSchema = false`, file `goals.db`, singleton `AppDb.get(context)`).
+- `GoalsViewModel.kt` — `AndroidViewModel`, DAO direct.
+- `app/src/test/java/com/bolsar/remembergoals/GoalTest.kt` — 5 JUnit tests (days, weeks, month clamp, DST, set-again copy).
+
+**Decisions**
+- `goals()` = every row with a deadline (ACTIVE, ACHIEVED and FAILED); the list shows resolved rows too.
+- `promote` resets `createdAt` to now so the promoted goal lands on top of the newest-first list.
+- `addGoal` with only one of amount/unit saves a clean dream (both duration fields null).
+- ViewModel actions are fire-and-forget (`viewModelScope.launch`, return Unit).
+- Guards live in SQL / one-liners: resolving a non-ACTIVE row or promoting a non-dream is a no-op; `setAgain` on a dream
+  is a no-op. `setAgain` does NOT require the passed object to be FAILED (the "Set again?" dialog may hold the pre-resolve
+  snapshot) — the UI only offers it after a fail.
+- No migrations: DB is `version = 1`, `exportSchema = false`. If a later chunk changes `Goal`, bump the version and add
+  `.fallbackToDestructiveMigration(dropAllTables = true)` to the builder (pre-release app, data loss acceptable) or a Migration.
+
+**For chunk 3 (list + add UI)**
+- Get it in Compose: `val vm: GoalsViewModel = viewModel()` (`androidx.lifecycle.viewmodel.compose.viewModel`; the
+  default factory builds AndroidViewModels) and `val goals by vm.goals.collectAsState()` (or `collectAsStateWithLifecycle`
+  only if you add `lifecycle-runtime-compose`, which is not a dependency now).
+- API: `goals: StateFlow<List<Goal>>`, `dreams: StateFlow<List<Goal>>`, `addGoal(title, description: String?,
+  amount: Int?, unit: DurationUnit?)` (null amount/unit => dream), `resolve(goal, achieved: Boolean, note)`,
+  `setAgain(goal)`, `promote(dream, amount, unit)`.
+- Pass `description = null` (not "") when blank; trim the title before calling.
+- UI must validate: title not blank, amount in 1..999 (0/negative gives a past deadline; huge values throw in java.time
+  inside the launch and crash), note not blank before `resolve` (ViewModel does not check).
+- Chunk 6 (notifications) will need the inserted id from `addGoal`/`setAgain`/`promote` to schedule work: schedule
+  inside those launches (`dao.insert` returns the id) and cancel inside `resolve`.
+
+**Review fixes** (`ponytail:ponytail-review`: lean, nothing to cut; `code-review` medium: 9 findings)
+- Fixed: `resolve` / `promote` used `@Update` with the UI's row snapshot (stale overwrite; re-resolving an ACHIEVED goal
+  from a late notification would flip it to FAILED; promote could reset a real goal) -> targeted UPDATE queries with
+  `status = 'ACTIVE'` / `deadline IS NULL` guards; `@Update` removed.
+- Fixed: `setAgain` on a dream crashed (`requireNotNull` inside launch) -> early return.
+- Fixed: non-unique ordering -> `ORDER BY createdAt DESC, id DESC`.
+- Deferred to UI (documented above): amount bounds, blank note. Skipped: migrations (none needed at v1), dropping
+  `getById` (chunk 6 needs it; task asked for it), merging the two Flows into one query (negligible cost).
+- Note: first `code-review` run saw nothing because changes were staged; run it on unstaged/`git add -N` changes or a
+  committed branch.
