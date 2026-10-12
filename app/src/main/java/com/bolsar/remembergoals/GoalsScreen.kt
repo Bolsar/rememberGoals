@@ -89,17 +89,26 @@ private val dateFormat = DateTimeFormatter.ofPattern("d MMM yyyy")
 
 private fun day(millis: Long): LocalDate = Instant.ofEpochMilli(millis).atZone(ZoneId.systemDefault()).toLocalDate()
 
-/** [resolveId]: open the resolve sheet for this goal on entry (chunk 6: notification tap). */
+/**
+ * [resolve]: (goal id, preselect "Achieved") from a notification — opens the resolve sheet, then [onResolveHandled]
+ * lets the caller clear it, so the same notification can open the sheet again later.
+ */
 @Composable
-fun GoalsScreen(vm: GoalsViewModel = viewModel(), resolveId: Long? = null) {
+fun GoalsScreen(vm: GoalsViewModel = viewModel(), resolve: Pair<Long, Boolean>? = null, onResolveHandled: () -> Unit = {}) {
     val goals by vm.goals.collectAsState()
     val dreams by vm.dreams.collectAsState()
     var adding by rememberSaveable { mutableStateOf(false) }
     // Ids, not Goal objects: saveable, and the lookup below always reads the fresh row.
     var resolvingId by rememberSaveable { mutableStateOf<Long?>(null) }
-    LaunchedEffect(resolveId) { if (resolveId != null) resolvingId = resolveId } // null never closes an open sheet
+    var resolvingAchieved by rememberSaveable { mutableStateOf(true) }
     var setAgainId by rememberSaveable { mutableStateOf<Long?>(null) }
     var promotingId by rememberSaveable { mutableStateOf<Long?>(null) }
+    LaunchedEffect(resolve) { // null never closes an open sheet
+        resolve?.let { (id, achieved) ->
+            adding = false; promotingId = null // never stack two sheets
+            resolvingId = id; resolvingAchieved = achieved; onResolveHandled()
+        }
+    }
 
     // Dreams reveal (Telegram archive): pulling down at the top of the list grows the dreams item (`pull` px, read only
     // in layout, so dragging never recomposes); past the threshold it snaps open and stays open (`dreamsOpen`).
@@ -202,7 +211,7 @@ fun GoalsScreen(vm: GoalsViewModel = viewModel(), resolveId: Long? = null) {
             }
             item { HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant) }
             items(goals, key = { it.id }) { goal ->
-                GoalRow(goal, onTick = { resolvingId = goal.id })
+                GoalRow(goal, onTick = { resolvingId = goal.id; resolvingAchieved = true })
             }
         }
     }
@@ -211,8 +220,8 @@ fun GoalsScreen(vm: GoalsViewModel = viewModel(), resolveId: Long? = null) {
     }
     // ponytail: null until the first DB emission or if the goal is gone / already resolved, so nothing shows.
     goals.find { it.id == resolvingId && it.status == Status.ACTIVE }?.let { goal ->
-        key(goal.id) { // fresh sheet state per goal
-            ResolveSheet(goal, onDismiss = { if (resolvingId == goal.id) resolvingId = null }) { achieved, note ->
+        key(goal.id) { // fresh sheet state per goal; a new preselection for an open sheet keeps the typed note
+            ResolveSheet(goal, resolvingAchieved, onDismiss = { if (resolvingId == goal.id) resolvingId = null }) { achieved, note ->
                 vm.resolve(goal, achieved, note)
                 if (!achieved) setAgainId = goal.id
             }
@@ -458,11 +467,16 @@ private fun PromoteSheet(dream: Goal, onDismiss: () -> Unit, onSave: (Int, Durat
 /** Close an ACTIVE goal: achieved / not achieved + a required note. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ResolveSheet(goal: Goal, onDismiss: () -> Unit, onSave: (achieved: Boolean, note: String) -> Unit) {
+private fun ResolveSheet(
+    goal: Goal,
+    initialAchieved: Boolean,
+    onDismiss: () -> Unit,
+    onSave: (achieved: Boolean, note: String) -> Unit,
+) {
     val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val scope = rememberCoroutineScope()
     val scheme = MaterialTheme.colorScheme
-    var achieved by rememberSaveable { mutableStateOf(true) }
+    var achieved by rememberSaveable { mutableStateOf(initialAchieved) }
     var note by rememberSaveable { mutableStateOf("") }
     var tried by rememberSaveable { mutableStateOf(false) }
     var saved by remember { mutableStateOf(false) } // blocks a double tap during the hide animation

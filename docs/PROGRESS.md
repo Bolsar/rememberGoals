@@ -405,3 +405,80 @@ amount (error), 2 weeks (due preview), goal appears on top and dream disappears;
   `invokeOnCompletion` saving on a cancelled hide (same intentional choice as chunk 4: the user pressed save);
   "dreams as plain item 0, start the list at index 1" (no threshold/snap, and a short/empty goals list can't scroll so
   dreams would always show — breaks the spec).
+
+## Chunk 6 — notifications
+
+**What changed**: Deadline reminders via WorkManager. A notification a day before and at the deadline opens the resolve
+sheet, with the choice preselected from the action button. The POST_NOTIFICATIONS permission is requested on launch.
+
+**Files**
+- `app/src/main/java/com/bolsar/remembergoals/Reminders.kt` (new, all notification code):
+  - `reminderDelays(deadline, now): Map<String, Long>` (pure): `"pre"` = deadline - 24h (dropped when that's not in the
+    future), `"due"` = deadline (clamped to 0 if past).
+  - `scheduleReminders(context, goalId, deadline)`: one unique `OneTimeWorkRequest<DueWorker>` per entry, named
+    `goal-<id>-pre` / `goal-<id>-due`, `ExistingWorkPolicy.REPLACE`, input `goalId` + `kind`.
+  - `cancelReminders(context, goalId)`: cancels both unique works and the goal's notification.
+  - `DueWorker` (CoroutineWorker): `dao.getById`; no-op if missing / not ACTIVE / permission denied (API 33+). Creates
+    channel `deadlines` ("Deadlines", default importance) and posts notification id = `goalId.toInt()` (so "due"
+    replaces a still-showing "pre"). Title = goal title; text "Due tomorrow. On track?" / "Today's the day. Did you make
+    it?". Tap (auto-cancel) and actions "Achieved" / "Not achieved" are `PendingIntent.getActivity` to `MainActivity`
+    (extras `EXTRA_GOAL_ID`, `EXTRA_ACHIEVED`; request codes `id*3 + 0/1/2`; `FLAG_IMMUTABLE | FLAG_UPDATE_CURRENT`;
+    `FLAG_ACTIVITY_NEW_TASK`).
+- `app/src/main/res/drawable/ic_stat_goal.xml` (new): white stroke tick box + check (status-bar small icon).
+- `app/src/test/java/com/bolsar/remembergoals/RemindersTest.kt` (new): 4 tests for `reminderDelays`.
+- `GoalsViewModel.kt`: `addGoal` (deadline only), `setAgain` (new id), `promote` (only when the UPDATE hit a row) schedule;
+  `resolve` cancels (+ dismisses the notification).
+- `AppDb.kt`: `promote` returns the updated row count (`Int`).
+- `MainActivity.kt`: `launchMode="singleTop"` (manifest). Activity state `resolve: Pair<Long, Boolean>?` (goal id,
+  preselect achieved) set from the intent in `onCreate` (skipped on recreation or Recents relaunch:
+  `savedInstanceState != null` / `FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY`) and in `onNewIntent`. Permission request on
+  first create (API 33+, if not granted); the result is ignored, the app works when denied.
+- `GoalsScreen.kt`: `GoalsScreen(vm, resolve: Pair<Long, Boolean>?, onResolveHandled)` replaces `resolveId`. The effect
+  copies id + preselection into saveable state, then calls `onResolveHandled` (activity sets null), so tapping the same
+  notification again reopens the sheet. `ResolveSheet(goal, initialAchieved, ...)`; `key(goal.id, resolvingAchieved)`.
+  The tick box always opens with "Achieved".
+- `AndroidManifest.xml`: `POST_NOTIFICATIONS` permission.
+
+**How to test notifications** (emulator only: `export ANDROID_SERIAL=emulator-5554`, adb is in
+`~/Library/Android/sdk/platform-tools`)
+- Add a goal with a duration, then list work:
+  `adb shell am broadcast -a androidx.work.diagnostics.REQUEST_DIAGNOSTICS -p com.bolsar.remembergoals` and
+  `adb logcat -d | grep WM-DiagnosticsWrkr` (shows unique names + JobScheduler job ids).
+- Delays: `adb shell dumpsys jobscheduler | grep "JobStatus.*<uid>"` (`TIME=+23h59m...`).
+- Force-run: WorkManager jobs live in a namespace, so `-n` is required:
+  `adb shell cmd jobscheduler run -f -n androidx.work.systemjobscheduler com.bolsar.remembergoals <jobId>`.
+- `adb shell cmd statusbar expand-notifications` to see it.
+
+**Verified on emulator** (API 37): permission prompt on first launch; promote 2 days -> `goal-1-pre` (+24h) and
+`goal-1-due` (+48h) enqueued; add 1 day -> only `-due`; forced pre and due notifications show the right text, icon and
+actions; "Not achieved" with the app in background (onNewIntent) opens the sheet preselected "Not achieved"; "Achieved"
+after the activity was finished (cold start) opens it preselected "Achieved"; dismissing and tapping the body again
+reopens it; resolving -> `goal-1-due` CANCELLED and the notification gone (also when resolved via the in-app tick);
+set again -> new `-due` work for the new id.
+
+**Known issues / deferred**
+- The large icon in the expanded notification is the default launcher icon until chunk 7 adds an app icon.
+- If permission is denied the reminder silently does nothing (no in-app hint). The row's "Nd over" still shows.
+- Reboots: WorkManager reschedules its own work, nothing extra needed.
+- "pre" is exactly 24h before (not calendar-day aware across DST).
+- Overdue ACTIVE goals stay ACTIVE after the due notification (as specified).
+
+**For chunk 7 (polish)**
+- Empty state (only after the first DB emission, see chunk 3), app icon (adaptive; it also becomes the notification
+  large icon), README with OFL license text for the bundled fonts, optional hairline border on the dark-mode set-again
+  dialog (needs a custom `Dialog`), whole-repo `ponytail-audit` + `code-review`.
+- Lint should then only show `NewerVersionAvailable` / `AndroidGradlePluginVersion`.
+
+**Review fixes** (`ponytail:ponytail-review`: one shrink; `code-review` medium: 9 findings)
+- ponytail: `DueWorker` aliased `applicationContext` late after using it twice -> one `ctx` up front.
+- Fixed: a late "pre" run (Doze/reboot, run after "due") could post "Due tomorrow" over the "due" notification -> the
+  worker skips "pre" once `now >= deadline`.
+- Fixed: `key(goal.id, resolvingAchieved)` rebuilt an open sheet (losing the typed note) on a second notification tap ->
+  `key(goal.id)`; a new preselection for an already-open sheet is ignored.
+- Fixed: a notification tap while the Add / Promote sheet was open stacked two sheets -> it closes them first
+  (an unsaved Add draft is dropped).
+- Skipped: backfilling reminders for goals created before this build (pre-release app, no users); worker-vs-resolve race
+  (ms window, worst case a stale notification whose tap does nothing); action buttons not auto-dismissing (intended:
+  the notification stays until the goal is really resolved, since the note is still required); permission asked on
+  launch (task allowed it; the system stops asking after two denials); channel created per run (idempotent, cheap);
+  centralizing schedule/cancel in a data layer (4 call sites, no repository by decision).

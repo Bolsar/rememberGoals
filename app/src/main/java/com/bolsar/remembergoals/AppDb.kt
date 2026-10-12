@@ -29,7 +29,7 @@ interface GoalDao {
     suspend fun resolve(id: Long, status: Status, note: String, resolvedAt: Long)
 
     @Query("UPDATE Goal SET durationAmount = :amount, durationUnit = :unit, deadline = :deadline, createdAt = :now WHERE id = :id AND deadline IS NULL")
-    suspend fun promote(id: Long, amount: Int, unit: DurationUnit, deadline: Long, now: Long)
+    suspend fun promote(id: Long, amount: Int, unit: DurationUnit, deadline: Long, now: Long): Int
 }
 
 @Database(entities = [Goal::class], version = 1, exportSchema = false)
