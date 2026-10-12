@@ -325,3 +325,83 @@ old FAILED row stays); No -> no new row.
   (Saving on a cancelled hide is intentional: the user pressed save, don't lose it.)
 - Fixed: a duplicated text-radio pattern -> `TextRadio`.
 - Skipped: the per-recomposition `find` scan for set-again (trivial on a personal list).
+
+## Chunk 5 — dreams-archive
+
+**What changed**: Dreams are hidden above the goals ledger and revealed by pulling the list down (Telegram archive
+style). A dream can be promoted to a goal from a sheet. All in `GoalsScreen.kt` (still the only UI file).
+
+**Files**
+- `app/src/main/java/com/bolsar/remembergoals/GoalsScreen.kt`:
+  - Top bar is now a `Row`: serif "Goals" + (when dreams exist and are folded) a faint mono hint `↓ 3 dreams` on the
+    same baseline. The hint is clickable ("Show dreams"): scrolls to top and opens the section (the accessible way in,
+    since a pull gesture isn't). The bar now has a paper `background`, because rows scroll under it (before this, list
+    rows drew through the title when scrolled — pre-existing bug, fixed here).
+  - `LazyColumn` now has `state = list`, `Modifier.fillMaxSize()` (needed: without it an empty/short list wraps its
+    content and the pull area has no touch target) and `.nestedScroll(reveal)`.
+  - First lazy item (`key = "dreams"`) holds `DreamsSection`, wrapped in a `clipToBounds().layout {}` that reports only
+    `pull` px of height (or the full height when `dreamsOpen`) and places the content bottom-first, so it slides out from
+    under the title. `clearAndSetSemantics {}` while folded so TalkBack doesn't find hidden Promote buttons.
+  - `DreamsSection(dreams, onCollapse, onPromote)`: clickable italic serif "Dreams" heading + mono `↑ fold` (tap folds),
+    then one ruled row per dream: faded italic serif title, faded description (2 lines), ink "Promote" text button. Empty
+    state line: "None yet. A goal saved without a duration waits here." (shown only if you pull with no dreams).
+  - `PromoteSheet(dream, onDismiss, onSave(amount, unit))`: `LedgerSheet` + italic dream title + `DurationFields` + mono
+    line (`Give it a deadline to make it a goal` / `due <date>` preview) + "Make it a goal". Amount must be 1..999
+    (error `1–999` while invalid and non-empty, or after a save attempt). Saves **after** the hide animation (the dream
+    leaves `dreams` on save, which would drop the sheet mid-animation). `saved` double-tap guard.
+  - `DurationFields(amount, onAmount, unit, onUnit, error, emptyHint)`: the amount + unit row plus the mono line under
+    it (`due <date>` preview, or `emptyHint` when there is no valid 1..999 amount), extracted from `AddGoalSheet`, now
+    used by both sheets.
+  - `promotingId: Long?` (rememberSaveable) + `dreams.find { it.id == promotingId }` inside `key(dream.id)` — same
+    id-state pattern as resolve.
+
+**How the reveal works** (state in `GoalsScreen`):
+- `dreamsOpen` (saveable Boolean), `pull` (px shown while folded/dragging; read only in layout, so dragging relayouts
+  without recomposing), `dreamsHeight` (natural section height, written from the layout block).
+- `NestedScrollConnection`:
+  - `onPostScroll`, finger drags only (`NestedScrollSource.UserInput`, never flings): leftover downward delta (= list at
+    the top) grows `pull` at half speed, capped at `dreamsHeight`; leftover upward delta while open and
+    `!list.canScrollBackward` (= list too short to scroll) flips to folded with `pull = dreamsHeight - delta`, so you
+    can drag it back up.
+  - `onPreScroll`: a finger drag cancels a running settle animation; while partly pulled, upward drags shrink `pull`
+    before the list scrolls.
+  - `onPreFling`: if partly pulled, `settle(pull >= min(56.dp, height / 2))`; consumes the fling only when opening.
+- `settle(open)` is the single animation (tap the hint/heading, release): it cancels the previous one (one `Job`), so
+  double taps or a tap during a release can't leave two animations writing `pull`.
+- Folding: tap the heading (animated), drag it back up (short list), or scroll the list so the section leaves the screen
+  (`snapshotFlow { list.firstVisibleItemIndex > 0 }` → `dreamsOpen = false`; the lazy list keeps its anchor, no jump).
+- Promote keeps the section open; the new goal lands on top of the goals ledger right under it.
+
+**Verified on emulator** (Small_Phone, light + dark): hint + plural; short pull snaps back; long pull snaps open; fold by
+tap, by drag-up on a short list, and by scrolling a 10-goal list away; hint tap from a scrolled list; promote with empty
+amount (error), 2 weeks (due preview), goal appears on top and dream disappears; pull on an empty goals list.
+
+**Known issues / deferred**
+- All dreams live in one lazy item (a `Column`), so a huge dream list isn't lazily composed. Fine for a personal list.
+- Rotation while half-pulled resets the pull (only `dreamsOpen` is saved). Intended.
+- `↓` / `↑` are plain arrows (U+2193 / U+2191), not emoji.
+- Dreams can't be edited or deleted (not in spec).
+- Mouse-wheel scrolling at the top is `UserInput` too and never flings, so it can leave a half pull until the next
+  touch drag settles it (`ponytail:` comment in code). Phone-only app, so accepted.
+- Promoting the last dream leaves the open section showing its empty line; fold it with the heading.
+- Release velocity is ignored: open/closed depends only on how far you pulled.
+
+**For chunk 6 (notifications)**
+- `vm.promote(dream, amount, unit)` is the promote entry point (`GoalsViewModel.promote`). It updates the row in place
+  (same id, `deadline` set), so schedule `goal-<dream.id>-pre` / `-due` work right after `dao.promote` inside its launch,
+  using the computed deadline. `addGoal` (only when it has a deadline) and `setAgain` (new id from `dao.insert`) need the
+  same scheduling; `resolve` cancels.
+- The resolve-from-notification hook is unchanged: `GoalsScreen(resolveId = ...)` (see chunk 4).
+
+**Review fixes** (`ponytail:ponytail-review`: one shrink; `code-review` medium: 10 findings)
+- ponytail: inlined a one-use `italic` alias.
+- Fixed: open/fold/release animations ran in separate coroutines and could race (double tap reopened a fold) -> one
+  `settle(open)` that cancels the previous `Job`; a finger drag also cancels it (no freeze half-way, no fight).
+- Fixed: the upward "fold by drag" also fired on bottom overscroll of a long list -> only when `!list.canScrollBackward`.
+- Fixed: a fling was swallowed when a small pull settled closed -> consumed only when opening.
+- Fixed: `threshold` frozen in `remember {}` -> `remember(threshold)`.
+- Fixed: due-preview `Text` duplicated in both sheets -> moved into `DurationFields(emptyHint)`.
+- Skipped: mouse-wheel half pull, all dreams in one lazy item, velocity-based snap (see Known issues);
+  `invokeOnCompletion` saving on a cancelled hide (same intentional choice as chunk 4: the user pressed save);
+  "dreams as plain item 0, start the list at index 1" (no threshold/snap, and a short/empty goals list can't scroll so
+  dreams would always show — breaks the spec).

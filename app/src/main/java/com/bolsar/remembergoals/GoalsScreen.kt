@@ -1,19 +1,23 @@
 package com.bolsar.remembergoals
 
+import androidx.compose.animation.core.animate
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.items
@@ -38,19 +42,28 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.layout.layout
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
@@ -58,16 +71,19 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.bolsar.remembergoals.ui.theme.DateStyle
 import com.bolsar.remembergoals.ui.theme.NotebookMargin
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.time.temporal.ChronoUnit
+import kotlin.math.roundToInt
 
 private val dateFormat = DateTimeFormatter.ofPattern("d MMM yyyy")
 
@@ -77,24 +93,113 @@ private fun day(millis: Long): LocalDate = Instant.ofEpochMilli(millis).atZone(Z
 @Composable
 fun GoalsScreen(vm: GoalsViewModel = viewModel(), resolveId: Long? = null) {
     val goals by vm.goals.collectAsState()
+    val dreams by vm.dreams.collectAsState()
     var adding by rememberSaveable { mutableStateOf(false) }
     // Ids, not Goal objects: saveable, and the lookup below always reads the fresh row.
     var resolvingId by rememberSaveable { mutableStateOf<Long?>(null) }
     LaunchedEffect(resolveId) { if (resolveId != null) resolvingId = resolveId } // null never closes an open sheet
     var setAgainId by rememberSaveable { mutableStateOf<Long?>(null) }
+    var promotingId by rememberSaveable { mutableStateOf<Long?>(null) }
+
+    // Dreams reveal (Telegram archive): pulling down at the top of the list grows the dreams item (`pull` px, read only
+    // in layout, so dragging never recomposes); past the threshold it snaps open and stays open (`dreamsOpen`).
+    val list = rememberLazyListState()
+    val scope = rememberCoroutineScope()
+    var dreamsOpen by rememberSaveable { mutableStateOf(false) }
+    var pull by remember { mutableFloatStateOf(0f) }
+    var dreamsHeight by remember { mutableFloatStateOf(0f) } // natural height of the section, measured in layout
+    val threshold = with(LocalDensity.current) { 56.dp.toPx() }
+    // The one settle animation (tap, fold, release); a new settle or a new drag cancels the running one.
+    val settling = remember { mutableStateOf<Job?>(null) }
+    fun settle(open: Boolean) {
+        settling.value?.cancel()
+        if (dreamsOpen) { pull = dreamsHeight; dreamsOpen = false } // folding starts from the full height
+        settling.value = scope.launch {
+            animate(pull, if (open) dreamsHeight else 0f) { v, _ -> pull = v }
+            dreamsOpen = open
+            pull = 0f
+        }
+    }
+    val reveal = remember(threshold) {
+        object : NestedScrollConnection {
+            // Dragging back up while half-pulled shrinks the pull before the list scrolls.
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                settling.value?.takeIf { it.isActive && source == NestedScrollSource.UserInput }?.cancel() // finger wins
+                if (dreamsOpen || pull == 0f || available.y >= 0) return Offset.Zero
+                val used = maxOf(available.y, -pull)
+                pull += used
+                return Offset(0f, used)
+            }
+
+            // Only the leftover of a finger drag (never a fling): down at the top pulls, with some resistance; up on a
+            // list too short to scroll starts folding open dreams back (onPreFling then settles either way).
+            // ponytail: mouse-wheel input is UserInput too and never flings, so it can leave a half pull until the next drag.
+            override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
+                if (source != NestedScrollSource.UserInput) return Offset.Zero
+                if (dreamsOpen && available.y < 0 && !list.canScrollBackward) {
+                    dreamsOpen = false
+                    pull = (dreamsHeight + available.y).coerceAtLeast(0f)
+                } else if (!dreamsOpen && available.y > 0) {
+                    pull = (pull + available.y / 2).coerceAtMost(dreamsHeight)
+                } else return Offset.Zero
+                return Offset(0f, available.y)
+            }
+
+            override suspend fun onPreFling(available: Velocity): Velocity {
+                if (dreamsOpen || pull == 0f) return Velocity.Zero
+                val open = pull >= minOf(threshold, dreamsHeight / 2)
+                settle(open)
+                return if (open) available else Velocity.Zero // closing hands the fling back to the list
+            }
+        }
+    }
+    fun openDreams() = scope.launch { list.animateScrollToItem(0); settle(true) }
+    // Scrolled fully past the dreams => they fold away again (the list keeps its anchor, so nothing jumps).
+    LaunchedEffect(list) { snapshotFlow { list.firstVisibleItemIndex > 0 }.collect { if (it) dreamsOpen = false } }
+
     Scaffold(
         topBar = {
-            Text(
-                "Goals",
-                style = MaterialTheme.typography.displayMedium,
-                modifier = Modifier
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .background(MaterialTheme.colorScheme.background) // rows scroll under the title, so hide them
                     .statusBarsPadding()
-                    .padding(start = NotebookMargin, top = 24.dp, bottom = 8.dp),
-            )
+                    .padding(start = NotebookMargin, end = 24.dp, top = 24.dp, bottom = 8.dp),
+            ) {
+                Text("Goals", style = MaterialTheme.typography.displayMedium, modifier = Modifier.weight(1f).alignByBaseline())
+                if (dreams.isNotEmpty() && !dreamsOpen) {
+                    Text(
+                        "↓ ${dreams.size} dream${if (dreams.size == 1) "" else "s"}",
+                        style = DateStyle,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.alignByBaseline().clickable(onClickLabel = "Show dreams") { openDreams() },
+                    )
+                }
+            }
         },
         floatingActionButton = { AddFab { adding = true } },
     ) { padding ->
-        LazyColumn(contentPadding = PaddingValues(top = padding.calculateTopPadding(), bottom = padding.calculateBottomPadding() + 96.dp)) {
+        LazyColumn(
+            state = list,
+            contentPadding = PaddingValues(top = padding.calculateTopPadding(), bottom = padding.calculateBottomPadding() + 96.dp),
+            modifier = Modifier.fillMaxSize().nestedScroll(reveal), // full height: an empty list must still take the pull
+        ) {
+            item(key = "dreams") {
+                // Shows `pull` px (or all when open) of the section, bottom edge first, as if it slid out from under the title.
+                Box(
+                    Modifier
+                        .clipToBounds()
+                        .layout { m, c ->
+                            val p = m.measure(c)
+                            dreamsHeight = p.height.toFloat()
+                            val h = if (dreamsOpen) p.height else pull.roundToInt().coerceIn(0, p.height)
+                            layout(p.width, h) { p.place(0, h - p.height) }
+                        }
+                        .then(if (dreamsOpen) Modifier else Modifier.clearAndSetSemantics {}), // folded = not there for TalkBack
+                ) {
+                    DreamsSection(dreams, onCollapse = { settle(false) }, onPromote = { promotingId = it.id })
+                }
+            }
             item { HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant) }
             items(goals, key = { it.id }) { goal ->
                 GoalRow(goal, onTick = { resolvingId = goal.id })
@@ -110,6 +215,13 @@ fun GoalsScreen(vm: GoalsViewModel = viewModel(), resolveId: Long? = null) {
             ResolveSheet(goal, onDismiss = { if (resolvingId == goal.id) resolvingId = null }) { achieved, note ->
                 vm.resolve(goal, achieved, note)
                 if (!achieved) setAgainId = goal.id
+            }
+        }
+    }
+    dreams.find { it.id == promotingId }?.let { dream ->
+        key(dream.id) {
+            PromoteSheet(dream, onDismiss = { if (promotingId == dream.id) promotingId = null }) { amount, unit ->
+                vm.promote(dream, amount, unit)
             }
         }
     }
@@ -229,24 +341,7 @@ private fun AddGoalSheet(onDismiss: () -> Unit, onSave: (String, String?, Int?, 
             error = "A goal needs a name".takeIf { titleError },
             textStyle = MaterialTheme.typography.titleLarge,
         )
-        Row(verticalAlignment = Alignment.Bottom) {
-            LedgerField(
-                "For", amount, { amount = it.filter(Char::isDigit).take(3) },
-                modifier = Modifier.width(72.dp),
-                error = "1–999".takeIf { amountError },
-                keyboardType = KeyboardType.Number,
-            )
-            Row(Modifier.padding(start = 20.dp, bottom = if (amountError) 22.dp else 6.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                DurationUnit.entries.forEach { u -> TextRadio(u.name.lowercase(), u == unit) { unit = u } }
-            }
-        }
-        Text(
-            if (n == null || n == 0) "No duration — saved as a dream"
-            else "due ${day(deadlineFrom(System.currentTimeMillis(), n, unit)).format(dateFormat)}",
-            style = DateStyle,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(top = 8.dp),
-        )
+        DurationFields(amount, { amount = it }, unit, { unit = it }, amountError, emptyHint = "No duration — saved as a dream")
         LedgerField("Description", description, { description = it }, singleLine = false)
         TextButton(
             onClick = {
@@ -258,6 +353,105 @@ private fun AddGoalSheet(onDismiss: () -> Unit, onSave: (String, String?, Int?, 
             },
             modifier = Modifier.align(Alignment.End).padding(top = 16.dp),
         ) { Text("Write it down", style = MaterialTheme.typography.titleMedium) }
+    }
+}
+
+/** Amount (digits only, max 3) + days/weeks/months, then a mono line: the due-date preview, or [emptyHint] if no valid amount. */
+@Composable
+private fun DurationFields(
+    amount: String,
+    onAmount: (String) -> Unit,
+    unit: DurationUnit,
+    onUnit: (DurationUnit) -> Unit,
+    error: Boolean,
+    emptyHint: String,
+) {
+    val n = amount.toIntOrNull()?.takeIf { it > 0 }
+    Row(verticalAlignment = Alignment.Bottom) {
+        LedgerField(
+            "For", amount, { onAmount(it.filter(Char::isDigit).take(3)) },
+            modifier = Modifier.width(72.dp),
+            error = "1–999".takeIf { error },
+            keyboardType = KeyboardType.Number,
+        )
+        Row(Modifier.padding(start = 20.dp, bottom = if (error) 22.dp else 6.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            DurationUnit.entries.forEach { u -> TextRadio(u.name.lowercase(), u == unit) { onUnit(u) } }
+        }
+    }
+    Text(
+        if (n == null) emptyHint else "due ${day(deadlineFrom(System.currentTimeMillis(), n, unit)).format(dateFormat)}",
+        style = DateStyle,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(top = 8.dp),
+    )
+}
+
+/** The archive: faded italic serif, one ruled row per dream. Tapping the heading folds it away. */
+@Composable
+private fun DreamsSection(dreams: List<Goal>, onCollapse: () -> Unit, onPromote: (Goal) -> Unit) {
+    val faint = MaterialTheme.colorScheme.onSurfaceVariant
+    Column(Modifier.padding(bottom = 24.dp)) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clickable(onClickLabel = "Hide dreams", onClick = onCollapse)
+                .padding(start = NotebookMargin, end = 24.dp, top = 8.dp, bottom = 10.dp),
+        ) {
+            Text("Dreams", style = MaterialTheme.typography.headlineSmall.copy(fontStyle = FontStyle.Italic), color = faint, modifier = Modifier.weight(1f).alignByBaseline())
+            Text("↑ fold", style = DateStyle, color = faint, modifier = Modifier.alignByBaseline())
+        }
+        if (dreams.isEmpty()) {
+            Text(
+                "None yet. A goal saved without a duration waits here.",
+                style = MaterialTheme.typography.bodyMedium.copy(fontStyle = FontStyle.Italic),
+                color = faint,
+                modifier = Modifier.padding(start = NotebookMargin, end = 24.dp),
+            )
+        }
+        dreams.forEach { dream ->
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Row(Modifier.padding(start = NotebookMargin, end = 12.dp, top = 10.dp, bottom = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(dream.title, style = MaterialTheme.typography.titleLarge.copy(fontStyle = FontStyle.Italic), color = faint)
+                    dream.description?.let {
+                        Text(it, style = MaterialTheme.typography.bodyMedium, color = faint, maxLines = 2, modifier = Modifier.padding(top = 4.dp))
+                    }
+                }
+                TextButton({ onPromote(dream) }) { Text("Promote", style = MaterialTheme.typography.bodyMedium) }
+            }
+        }
+    }
+}
+
+/** Dream -> goal: pick a duration. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun PromoteSheet(dream: Goal, onDismiss: () -> Unit, onSave: (Int, DurationUnit) -> Unit) {
+    val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val scope = rememberCoroutineScope()
+    var amount by rememberSaveable { mutableStateOf("") }
+    var unit by rememberSaveable { mutableStateOf(DurationUnit.DAYS) }
+    var tried by rememberSaveable { mutableStateOf(false) }
+    var saved by remember { mutableStateOf(false) } // blocks a double tap during the hide animation
+    val n = amount.toIntOrNull()?.takeIf { it > 0 } // digits-only, max 3 chars => null or 1..999
+
+    LedgerSheet(sheet, onDismiss) {
+        Text(dream.title, style = MaterialTheme.typography.headlineMedium.copy(fontStyle = FontStyle.Italic))
+        DurationFields(
+            amount, { amount = it }, unit, { unit = it },
+            error = n == null && (tried || amount.isNotEmpty()),
+            emptyHint = "Give it a deadline to make it a goal",
+        )
+        TextButton(
+            onClick = {
+                tried = true
+                if (saved || n == null) return@TextButton
+                saved = true
+                // Save after the hide: the dream leaves the list on save, which would drop this sheet mid-animation.
+                scope.launch { sheet.hide() }.invokeOnCompletion { onSave(n, unit); onDismiss() }
+            },
+            modifier = Modifier.align(Alignment.End).padding(top = 16.dp),
+        ) { Text("Make it a goal", style = MaterialTheme.typography.titleMedium) }
     }
 }
 
