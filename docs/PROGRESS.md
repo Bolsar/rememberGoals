@@ -826,3 +826,126 @@ the same draft. A quick FAB tap during the close animation is ignored, and the n
 - Swiping the app from Recents with the page open loses the unsaved text (see Decisions).
 - Drafts have no swipe-to-delete; emptying the fields is the only way to discard one.
 - The emulator DB has test drafts ("Killed", "Quick") and goals ("Zebra", dream "Sail") from this chunk's walkthrough.
+
+## Chunk 10 — v2-telegram-archive
+
+**What changed**: Dreams are now Telegram's "Archived chats" row, built from the real Telegram Android source
+(`PullForegroundDrawable.java`, `DialogsActivity.java`, `DialogCell.java`, DrKLO/Telegram master). The row can be
+hidden, pulled out or pinned. You pull it out, swipe it left to pin or hide it, and tap it to open a full Dreams page
+where each dream has Promote. The v1/v2 `DreamsSection`, its nested-scroll reveal and the "↓ N dreams" title hint are gone.
+
+**Files**
+- `Archive.kt` (new):
+  - Pure `pullStep(pull, dy, full, maxOver)` and `pullSnaps(pull, full, ms)` (Telegram's parallax, rubber band and
+    release rule). Also `SNAP_HEIGHT = 0.85`, `MIN_PULLING_TIME = 200`, and `enum ArchiveState { HIDDEN, SHOWN, PINNED }`.
+  - `rememberArchive()` reads the pinned flag from SharedPreferences `archive` (`pinned`, `hint`). The state is
+    rememberSaveable.
+  - `class Archive` holds the state and `pull` (item height in px), every drawable progress as an `Animatable` (arrow,
+    text swap, text in, accent in/out, out, bounce, swipe reveal), the `NestedScrollConnection`, `gone()` (a shown row
+    hides again), `toggle()` (pin/hide, also the TalkBack action) and `swipeBy`/`swipeEnd`.
+  - `ArchiveRow` is the folder cell: a 52dp avatar with a drawn archive box, "Dreams", the dream titles joined by ", ",
+    and a muted count badge. A `layout {}` reports `pull` px and anchors the content to the bottom. `drawPull` is
+    `PullForegroundDrawable.draw()` ported to a `DrawScope`. Behind the card is the swipe action ("Hide"/"Pin" with an
+    accent circle past 45%).
+  - The pull drawable has the grey background, the 9dp circle at start 28dp with the 18dp Telegram arrow path, a
+    0.4-alpha 18dp pill from the top of the revealed area to the circle, and centered 16sp text "Swipe down for dreams"
+    / "Release for dreams".
+- `GoalsScreen.kt`:
+  - `DREAMS_PAGE = -1L` shares the `page` slot, so the Dreams page uses the Add Goal page's `AnimatedContent`
+    transition. `DreamsPage` has a back arrow, BackHandler, a "Dreams" title and 20dp cards with a "Promote" pill that
+    opens the existing `PromoteSheet`.
+  - `BackArrow` was extracted, because the Add Goal page and the Dreams page both use it.
+  - The `archive` lazy item exists only when dreams exist. `head` counts it conditionally.
+  - The list gets `nestedScroll(archive.connection)` and a "Show dreams" custom action (opens the page) only when
+    dreams exist.
+  - `snapshotFlow { firstVisibleItemIndex > 0 }` calls `archive.gone()`. An emptied dreams list hides a shown row and
+    closes the Dreams page.
+  - A one-time `Snackbar` shows "Swipe down to see the dreams".
+  - `mutedOn` is now `internal`.
+- `app/src/test/.../ArchiveTest.kt`: parallax 0.45 -> 0.2 and the 1px minimum, the cap at the row, the rubber band
+  (20% * (1 - over/max), capped at 72dp), 1:1 going back up, and the release rule (0.85 and 200ms).
+
+**Telegram numbers kept**: the row height (70dp), avatar (52dp at 10dp), SNAP_HEIGHT 0.85 and parallax
+`0.45 - 0.25k`. The overscroll is `0.2 * (1 - over/72dp)`. minPullingTime is 200ms for release and 220ms for colorize.
+The animations, with their Telegram interpolators:
+
+| Animation | Duration | Easing |
+| --- | --- | --- |
+| Arrow flip | 250ms | EASE_BOTH (0.42, 0, 0.58, 1) |
+| Text swap | 170ms | linear, scale 0.8/0.9 + 8dp shift |
+| Text in | 150ms linear (after 200ms when the first step is fast) | linear |
+| Accent reveal in/out | 230ms | accelerate (t²) |
+| Out | 250ms | EASE_OUT_QUINT (0.23, 1, 0.32, 1) |
+| Bounce | 150ms in + 135ms out, after 180ms | EASE_BOTH |
+| Settle back to shown | max(100, 350 - 120 * over/72dp) | EASE_OUT_QUINT |
+| Hide scroll | 300ms | EASE_OUT |
+| Swipe | 250ms | — |
+| Swipe reveal circle | 300ms | accelerated at draw time |
+| Pinned/hidden row and avatar color | 230ms | EASE_OUT_QUINT |
+
+Other Telegram behaviour kept:
+- A KEYBOARD_TAP haptic when crossing 0.85 and when crossing the swipe reveal.
+- Flings never pull, and going back up is 1:1.
+
+**Deviations from Telegram (and why)**
+- Three states like Telegram (HIDDEN / SHOWED / PINNED). A release past 0.85 leaves the row **shown**, not pinned. It
+  hides again once scrolled out of view, as in Telegram. Swipe-left on a shown row pins it (Telegram's swipeFolderBack:
+  the row springs back and the setting flips). Swipe-left on a pinned row slides it out and hides it. Only pinned vs
+  hidden is persisted, like `SharedConfig.archiveHidden`. The chunk spec said "release => pinned". This follows the
+  source instead.
+- Default is hidden. Telegram defaults to a pinned archive, but our spec says dreams stay hidden until pulled.
+- Colors: the pull background is the muted grey (`onSurfaceVariant`) with card-colored circle, pill and text. Telegram
+  draws white on a mid grey. The v2 archive grey can't carry readable white or ink text on both grey and blue. The
+  archive grey is still used as the pinned row background. Avatar: accent while hidden/shown, muted when pinned (as in
+  Telegram).
+- The row is a 20dp rounded card inside the 16dp gutter (v2 cards), not a full-width cell. The drawing is clipped to
+  the card. Overscroll stretches the card upward (Telegram translates the list and paints the header area).
+- The swipe commits at 45% (Telegram's reveal threshold) instead of ItemTouchHelper's 50% + escape velocity.
+- Hint: shown once (spec) instead of an UndoView on every hide. There is no "Archive pinned" toast.
+- Not ported:
+  - the swipe icon bounce (170ms)
+  - tooltip down-scaling for very narrow widths
+  - the long-press menu (TalkBack custom actions "Hide above the list" / "Pin in the list" cover it)
+  - the accessibility announcements on shown/hidden
+- Icons are hand-drawn Canvas paths: an archive box, and up/down arrows with a bar. Telegram uses Lottie.
+
+**Verified on emulator** (Small_Phone API 37, 720x1280, light + dark, `screenrecord` frames)
+- Pulling below 0.85 and releasing springs back to hidden.
+- Past 0.85: the arrow flips, the accent circle reveals and the text swaps. Going back below reverses it (grey circle
+  over the accent).
+- Releasing past 0.85 plays the out animation: the circle shrinks into the accent avatar and the icon moves and
+  bounces in. The row ends shown.
+- Swipe left on the shown row: blue "Pin" behind it, it springs back grey and pinned (`pinned=true`). It is still
+  pinned after a force-stop and relaunch.
+- Swipe left on the pinned row: grey "Hide" + accent reveal, it slides out, the list closes up, and the snackbar hint
+  shows once (`hint=true`).
+- Tapping the row opens the Dreams page (slide up). Promote 26 days moves the dream to the top of the goal list.
+  Promoting the last dream closes the page and the row disappears. With no dreams a pull is only the stretch overscroll.
+- Dark mode: the pull states, out animation and pinned row.
+
+**Review fixes** (`ponytail:ponytail-review`: one shrink; `code-review` medium: 8 findings, all fixed)
+- ponytail: the swipe reveal's remaining-time duration formula -> a plain `tween(300)`.
+- Fixed: on a list too short to scroll, a pulled-out row could never hide again. Now an upward drag the list can't use
+  moves the shown row up 1:1 (Telegram pads its list so the row can always scroll away). It hides once gone, and a
+  release finishes the move either way, by halves.
+- Fixed: when the last dream left mid-pull, a stale half pull stayed behind -> `gone()` resets any non-pinned pull,
+  swipe and drawable.
+- Fixed: the delayed text-in job outlived a reset -> it is tracked and cancelled.
+- Fixed: dragging a pull back to exactly 0 skipped the drawable reset -> `setPull(0)` resets.
+- Fixed: `swipeEnd` could toggle after `gone()` changed the state mid-animation (and burn the hint) -> it toggles
+  only if the state is unchanged.
+- Fixed: `pointerInput(state)` restarting mid-drag stranded the swipe offset -> keyed on the archive, with the state
+  checked per event.
+- Fixed: the Dreams page's BackHandler kept eating back presses while it animated out -> it closes once
+  (`closed`, like AddGoalPage).
+- Fixed: the hint snackbar could get stuck when a page opened (its host lives in the list branch) -> the effect is
+  keyed on `page` too and only runs over the list.
+- Found on the emulator after the fixes: `pulling` was a plain var read in the draw block, so the first frames of a
+  pull drew the row content instead of the drawable -> snapshot state.
+
+**Known issues / for chunk 11**
+- Not verified on the emulator: the short-list "drag a shown row away" path (the test DB's list is long), and the
+  TalkBack custom actions ("Show dreams", "Hide above the list" / "Pin in the list").
+- The mouse-wheel half-pull caveat from chunk 5 still applies (`ponytail:` comment).
+- README/screenshots still describe the old dreams section (chunk 11 rewrites them).
+- The emulator DB now also has the goals "Sail" and "Learn to sail" (promoted) and the dream "Climb Kilimanjaro".

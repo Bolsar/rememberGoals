@@ -16,7 +16,6 @@ import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.Canvas
@@ -57,6 +56,9 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.SheetState
+import androidx.compose.material3.Snackbar
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -65,7 +67,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -76,7 +77,6 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.lerp
@@ -85,21 +85,17 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.lerp
-import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
-import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
-import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -108,17 +104,17 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.bolsar.remembergoals.ui.theme.Gutter
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.time.temporal.ChronoUnit
-import kotlin.math.roundToInt
 
 private val dateFormat = DateTimeFormatter.ofPattern("d MMM yyyy")
 private val CardShape = RoundedCornerShape(20.dp)
+// ponytail: the Dreams page shares the Add Goal page's `page: Long?` slot (ids are > 0), so one AnimatedContent swaps both.
+private const val DREAMS_PAGE = -1L
 
 private fun day(millis: Long): LocalDate = Instant.ofEpochMilli(millis).atZone(ZoneId.systemDefault()).toLocalDate()
 
@@ -137,7 +133,7 @@ fun GoalsScreen(
     val goals by vm.goals.collectAsState() // null = not loaded yet (no empty-state flash)
     val loadedDreams by vm.dreams.collectAsState()
     val dreams = loadedDreams.orEmpty()
-    // Add Goal page: null = closed, 0 = new, else the draft id being completed.
+    // Page over the list: null = none, 0 = new goal, > 0 = the draft being completed, DREAMS_PAGE = dreams.
     var page by rememberSaveable { mutableStateOf<Long?>(null) }
     // Ids, not Goal objects: saveable, and the lookup below always reads the fresh row.
     var resolvingId by rememberSaveable { mutableStateOf<Long?>(null) }
@@ -161,71 +157,24 @@ fun GoalsScreen(
     }
     val entries = remember(goals, now) { timeline(goals.orEmpty(), now) }
 
-    // Dreams reveal (Telegram archive): pulling down at the top of the list grows the dreams item (`pull` px, read only
-    // in layout, so dragging never recomposes); past the threshold it snaps open and stays open (`dreamsOpen`).
+    // Dreams = Telegram's archive row (Archive.kt): hidden above the list, pulled out, pinned or swiped away.
     val list = rememberLazyListState()
     val scope = rememberCoroutineScope()
-    var dreamsOpen by rememberSaveable { mutableStateOf(false) }
-    var pull by remember { mutableFloatStateOf(0f) }
-    var dreamsHeight by remember { mutableFloatStateOf(0f) } // natural height of the section, measured in layout
-    val threshold = with(LocalDensity.current) { 56.dp.toPx() }
-    // The one settle animation (tap, fold, release); a new settle or a new drag cancels the running one.
-    val settling = remember { mutableStateOf<Job?>(null) }
-    fun settle(open: Boolean) {
-        settling.value?.cancel()
-        if (dreamsOpen) { pull = dreamsHeight; dreamsOpen = false } // folding starts from the full height
-        settling.value = scope.launch {
-            animate(pull, if (open) dreamsHeight else 0f) { v, _ -> pull = v }
-            dreamsOpen = open
-            pull = 0f
-        }
+    val archive = rememberArchive()
+    val snackbar = remember { SnackbarHostState() }
+    // Scrolled out of view, or the last dream left: a pulled-out row hides again (Telegram: SHOWED -> HIDDEN).
+    LaunchedEffect(list) { snapshotFlow { list.firstVisibleItemIndex > 0 }.collect { if (it) archive.gone() } }
+    LaunchedEffect(loadedDreams?.isEmpty()) {
+        if (loadedDreams?.isEmpty() == true) { archive.gone(); if (page == DREAMS_PAGE) page = null } // Telegram closes an emptied archive
     }
-    val reveal = remember(threshold) {
-        object : NestedScrollConnection {
-            // Dragging back up while half-pulled shrinks the pull before the list scrolls.
-            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
-                settling.value?.takeIf { it.isActive && source == NestedScrollSource.UserInput }?.cancel() // finger wins
-                if (dreamsOpen || pull == 0f || available.y >= 0) return Offset.Zero
-                val used = maxOf(available.y, -pull)
-                pull += used
-                return Offset(0f, used)
-            }
-
-            // Only the leftover of a finger drag (never a fling): down at the top pulls, with some resistance; up on a
-            // list too short to scroll starts folding open dreams back (onPreFling then settles either way).
-            // ponytail: mouse-wheel input is UserInput too and never flings, so it can leave a half pull until the next drag.
-            override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
-                if (source != NestedScrollSource.UserInput) return Offset.Zero
-                if (dreamsOpen && available.y < 0 && !list.canScrollBackward) {
-                    dreamsOpen = false
-                    pull = (dreamsHeight + available.y).coerceAtLeast(0f)
-                } else if (!dreamsOpen && available.y > 0) {
-                    pull = (pull + available.y / 2).coerceAtMost(dreamsHeight)
-                } else return Offset.Zero
-                return Offset(0f, available.y)
-            }
-
-            override suspend fun onPreFling(available: Velocity): Velocity {
-                if (dreamsOpen || pull == 0f) return Velocity.Zero
-                val open = pull >= minOf(threshold, dreamsHeight / 2)
-                settle(open)
-                return if (open) available else Velocity.Zero // closing hands the fling back to the list
-            }
-        }
-    }
-    fun openDreams() = scope.launch { list.animateScrollToItem(0); settle(true) }
-    // Scrolled fully past the dreams => they fold away again (the list keeps its anchor, so nothing jumps).
-    LaunchedEffect(list) { snapshotFlow { list.firstVisibleItemIndex > 0 }.collect { if (it) dreamsOpen = false } }
-    // The last dream left (promoted): fold the now-empty section. Only on a change (drop the current value), so an
-    // empty archive pulled open on purpose keeps its "None yet" line, also across rotation.
-    LaunchedEffect(Unit) {
-        snapshotFlow { loadedDreams?.isEmpty() }.drop(1).collect { if (it == true && dreamsOpen) settle(false) }
-    }
+    // Reset only after it's shown: clearing the key first would restart (cancel) this effect.
+    // Only over the list (its Scaffold hosts the snackbar): opening a page cancels it and it shows again on return.
+    LaunchedEffect(archive.hint, page) { if (archive.hint && page == null) { snackbar.showSnackbar("Swipe down to see the dreams"); archive.hint = false } }
 
     val showReminders = remindersOff && goals.orEmpty().any { it.status == Status.ACTIVE && !it.draft }
     val showEmpty = goals?.isEmpty() == true && loadedDreams != null
-    // Lazy items emitted before the timeline (keep in sync with the LazyColumn below): "dreams", "reminders", "empty".
-    val head = 1 + (if (showReminders) 1 else 0) + (if (showEmpty) 1 else 0)
+    // Lazy items emitted before the timeline (keep in sync with the LazyColumn below): "archive", "reminders", "empty".
+    val head = (if (dreams.isNotEmpty()) 1 else 0) + (if (showReminders) 1 else 0) + (if (showEmpty) 1 else 0)
     // Reference chip: scroll the goal's card into view, then pulse it. A new tap cancels the running pulse.
     var highlighted by remember { mutableStateOf<Long?>(null) }
     val pulse = remember { mutableStateOf<Job?>(null) }
@@ -251,6 +200,10 @@ fun GoalsScreen(
         },
         label = "page",
     ) { shown ->
+        if (shown == DREAMS_PAGE) {
+            DreamsPage(dreams, onBack = { page = null }, onPromote = { promotingId = it.id })
+            return@AnimatedContent
+        }
         if (shown != null) {
             AddGoalPage(shown, draft = goals?.find { it.id == shown && it.draft }) { vm.savePage(shown, it); page = null }
             return@AnimatedContent
@@ -260,24 +213,17 @@ fun GoalsScreen(
         Scaffold(
             containerColor = MaterialTheme.colorScheme.background,
             topBar = {
-                Row(
-                    Modifier
+                Text(
+                    "Goals",
+                    style = MaterialTheme.typography.headlineLarge,
+                    modifier = Modifier
                         .fillMaxWidth()
                         .background(MaterialTheme.colorScheme.background) // cards scroll under the title, so hide them
                         .statusBarsPadding()
                         .padding(start = Gutter + 4.dp, end = Gutter + 4.dp, top = 20.dp, bottom = 12.dp),
-                ) {
-                    Text("Goals", style = MaterialTheme.typography.headlineLarge, modifier = Modifier.weight(1f).alignByBaseline())
-                    if (dreams.isNotEmpty() && !dreamsOpen) {
-                        Text(
-                            "↓ ${dreams.size} dream${if (dreams.size == 1) "" else "s"}",
-                            style = MaterialTheme.typography.labelLarge,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.alignByBaseline().clickable(onClickLabel = "Show dreams") { openDreams() },
-                        )
-                    }
-                }
+                )
             },
+            snackbarHost = { SnackbarHost(snackbar) { Snackbar(it, shape = RoundedCornerShape(14.dp)) } },
             floatingActionButton = {
                 AddFab(Modifier.animateEnterExit(enter = scaleIn(spring(Spring.DampingRatioMediumBouncy)), exit = scaleOut())) { open(0L) }
             },
@@ -285,24 +231,15 @@ fun GoalsScreen(
             LazyColumn(
                 state = list,
                 contentPadding = PaddingValues(top = padding.calculateTopPadding(), bottom = padding.calculateBottomPadding() + 96.dp),
-                modifier = Modifier.fillMaxSize().nestedScroll(reveal), // full height: an empty list must still take the pull
+                // Full height: an empty list must still take the pull. TalkBack can't pull, so the list offers "Show dreams".
+                modifier = Modifier.fillMaxSize().then(
+                    if (dreams.isEmpty()) Modifier
+                    else Modifier.nestedScroll(archive.connection).semantics {
+                        customActions = listOf(CustomAccessibilityAction("Show dreams") { open(DREAMS_PAGE); true })
+                    },
+                ),
             ) {
-                item(key = "dreams") {
-                    // Shows `pull` px (or all when open) of the section, bottom edge first, as if it slid out from under the title.
-                    Box(
-                        Modifier
-                            .clipToBounds()
-                            .layout { m, c ->
-                                val p = m.measure(c)
-                                dreamsHeight = p.height.toFloat()
-                                val h = if (dreamsOpen) p.height else pull.roundToInt().coerceIn(0, p.height)
-                                layout(p.width, h) { p.place(0, h - p.height) }
-                            }
-                            .then(if (dreamsOpen) Modifier else Modifier.clearAndSetSemantics {}), // folded = not there for TalkBack
-                    ) {
-                        DreamsSection(dreams, onCollapse = { settle(false) }, onPromote = { promotingId = it.id })
-                    }
-                }
+                if (dreams.isNotEmpty()) item(key = "archive") { ArchiveRow(archive, dreams) { open(DREAMS_PAGE) } }
                 if (showReminders) item(key = "reminders") { RemindersOffLine() }
                 if (showEmpty) item(key = "empty") { EmptyState(hasDreams = dreams.isNotEmpty()) }
                 items(entries, key = { it.key }) { entry ->
@@ -351,7 +288,7 @@ private fun ColorScheme.tone(status: Status, overdue: Boolean): Pair<Color, Colo
 
 /** Muted text: the theme's muted grey on a plain card, ink 70% on a tinted status surface (keeps AA contrast). */
 @Composable
-private fun mutedOn(tinted: Boolean) = MaterialTheme.colorScheme.run { if (tinted) onSurface.copy(alpha = 0.7f) else onSurfaceVariant }
+internal fun mutedOn(tinted: Boolean) = MaterialTheme.colorScheme.run { if (tinted) onSurface.copy(alpha = 0.7f) else onSurfaceVariant }
 
 /** No goals yet. */
 @Composable
@@ -579,19 +516,7 @@ private fun AddGoalPage(id: Long, draft: Goal?, onClose: (Goal?) -> Unit) {
     val scheme = MaterialTheme.colorScheme
     Surface(color = scheme.background) { Column(Modifier.fillMaxSize().safeDrawingPadding()) { // Surface: ink text color
         Row(Modifier.fillMaxWidth().padding(start = 4.dp, end = Gutter, top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(
-                Modifier.size(48.dp).clip(CircleShape).clickable { close(add = false) }.semantics { contentDescription = "Back" },
-                contentAlignment = Alignment.Center,
-            ) {
-                val ink = scheme.onSurface
-                Canvas(Modifier.size(18.dp)) { // hand-drawn "←", like the FAB's "+"
-                    val w = 2.dp.toPx()
-                    val y = size.height / 2
-                    drawLine(ink, Offset(size.width, y), Offset(0f, y), w, StrokeCap.Round)
-                    drawLine(ink, Offset(0f, y), Offset(y, 0f), w, StrokeCap.Round)
-                    drawLine(ink, Offset(0f, y), Offset(y, size.height), w, StrokeCap.Round)
-                }
-            }
+            BackArrow(Modifier) { close(add = false) }
             Box(Modifier.weight(1f))
             Button(
                 {
@@ -656,43 +581,62 @@ private fun DurationFields(
     )
 }
 
-/** The archive (restyled; chunk 10 replaces it with the Telegram archive row): grey cards, tap the heading to fold. */
+/** Tapping the archive row: every dream as a card, each with Promote (the duration sheet). Back closes the page. */
 @Composable
-private fun DreamsSection(dreams: List<Goal>, onCollapse: () -> Unit, onPromote: (Goal) -> Unit) {
-    val muted = MaterialTheme.colorScheme.onSurfaceVariant
-    Column(Modifier.padding(start = Gutter, end = Gutter, bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(12.dp))
-                .clickable(onClickLabel = "Hide dreams", onClick = onCollapse)
-                .padding(horizontal = 4.dp, vertical = 8.dp),
-        ) {
-            Text("Dreams", style = MaterialTheme.typography.titleMedium, color = muted, modifier = Modifier.weight(1f).alignByBaseline())
-            Text("↑ Hide", style = MaterialTheme.typography.labelLarge, color = muted, modifier = Modifier.alignByBaseline())
-        }
-        if (dreams.isEmpty()) {
-            Text(
-                "None yet. A goal saved without a duration waits here.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = muted,
-                modifier = Modifier.padding(horizontal = 4.dp),
-            )
-        }
-        dreams.forEach { dream ->
-            Row(
-                Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(MaterialTheme.colorScheme.surfaceVariant)
-                    .padding(start = 16.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text(dream.title, style = MaterialTheme.typography.titleMedium)
-                    dream.description?.let {
-                        Text(it, style = MaterialTheme.typography.bodyMedium, color = muted, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    }
-                }
-                TextButton({ onPromote(dream) }) { Text("Promote", style = MaterialTheme.typography.labelLarge) }
+private fun DreamsPage(dreams: List<Goal>, onBack: () -> Unit, onPromote: (Goal) -> Unit) {
+    // Closes once: while it animates out, a second back must reach the list/activity, not this leaving page.
+    var closed by remember { mutableStateOf(false) }
+    fun close() { if (!closed) { closed = true; onBack() } }
+    BackHandler(!closed) { close() }
+    val scheme = MaterialTheme.colorScheme
+    Surface(color = scheme.background) { Column(Modifier.fillMaxSize().safeDrawingPadding()) {
+        BackArrow(Modifier.padding(start = 4.dp, top = 8.dp)) { close() }
+        LazyColumn(contentPadding = PaddingValues(horizontal = Gutter, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            item(key = "title") {
+                Text("Dreams", style = MaterialTheme.typography.headlineLarge, modifier = Modifier.padding(start = 4.dp, bottom = 6.dp))
             }
+            items(dreams, key = { it.id }) { dream ->
+                Row(
+                    Modifier.animateItem().fillMaxWidth().clip(CardShape).background(scheme.surface).padding(start = 16.dp, end = 12.dp, top = 14.dp, bottom = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(dream.title, style = MaterialTheme.typography.titleMedium)
+                        dream.description?.let {
+                            Text(it, style = MaterialTheme.typography.bodyMedium, color = scheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp))
+                        }
+                    }
+                    Text(
+                        "Promote",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = scheme.primary,
+                        modifier = Modifier
+                            .padding(start = 8.dp)
+                            .clip(CircleShape)
+                            .background(scheme.primary.copy(alpha = 0.12f))
+                            .clickable(role = Role.Button, onClickLabel = "Give it a deadline") { onPromote(dream) }
+                            .padding(horizontal = 14.dp, vertical = 8.dp),
+                    )
+                }
+            }
+        }
+    } }
+}
+
+/** Hand-drawn "←" (48dp target), like the FAB's "+". */
+@Composable
+private fun BackArrow(modifier: Modifier, onClick: () -> Unit) {
+    val ink = MaterialTheme.colorScheme.onSurface
+    Box(
+        modifier.size(48.dp).clip(CircleShape).clickable(onClick = onClick).semantics { contentDescription = "Back" },
+        contentAlignment = Alignment.Center,
+    ) {
+        Canvas(Modifier.size(18.dp)) {
+            val w = 2.dp.toPx()
+            val y = size.height / 2
+            drawLine(ink, Offset(size.width, y), Offset(0f, y), w, StrokeCap.Round)
+            drawLine(ink, Offset(0f, y), Offset(y, 0f), w, StrokeCap.Round)
+            drawLine(ink, Offset(0f, y), Offset(y, size.height), w, StrokeCap.Round)
         }
     }
 }
