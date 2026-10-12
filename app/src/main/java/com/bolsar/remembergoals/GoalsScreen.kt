@@ -1,8 +1,12 @@
 package com.bolsar.remembergoals
 
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
 import androidx.compose.animation.core.animate
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -56,6 +60,7 @@ import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.layout
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.runtime.collectAsState
@@ -72,11 +77,13 @@ import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.Velocity
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.bolsar.remembergoals.ui.theme.DateStyle
 import com.bolsar.remembergoals.ui.theme.NotebookMargin
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 import java.time.Instant
 import java.time.LocalDate
@@ -92,11 +99,18 @@ private fun day(millis: Long): LocalDate = Instant.ofEpochMilli(millis).atZone(Z
 /**
  * [resolve]: (goal id, preselect "Achieved") from a notification — opens the resolve sheet, then [onResolveHandled]
  * lets the caller clear it, so the same notification can open the sheet again later.
+ * [remindersOff]: notifications are blocked, so a faint line offers the system settings.
  */
 @Composable
-fun GoalsScreen(vm: GoalsViewModel = viewModel(), resolve: Pair<Long, Boolean>? = null, onResolveHandled: () -> Unit = {}) {
-    val goals by vm.goals.collectAsState()
-    val dreams by vm.dreams.collectAsState()
+fun GoalsScreen(
+    vm: GoalsViewModel = viewModel(),
+    resolve: Pair<Long, Boolean>? = null,
+    onResolveHandled: () -> Unit = {},
+    remindersOff: Boolean = false,
+) {
+    val goals by vm.goals.collectAsState() // null = not loaded yet (no empty-state flash)
+    val loadedDreams by vm.dreams.collectAsState()
+    val dreams = loadedDreams.orEmpty()
     var adding by rememberSaveable { mutableStateOf(false) }
     // Ids, not Goal objects: saveable, and the lookup below always reads the fresh row.
     var resolvingId by rememberSaveable { mutableStateOf<Long?>(null) }
@@ -165,6 +179,11 @@ fun GoalsScreen(vm: GoalsViewModel = viewModel(), resolve: Pair<Long, Boolean>? 
     fun openDreams() = scope.launch { list.animateScrollToItem(0); settle(true) }
     // Scrolled fully past the dreams => they fold away again (the list keeps its anchor, so nothing jumps).
     LaunchedEffect(list) { snapshotFlow { list.firstVisibleItemIndex > 0 }.collect { if (it) dreamsOpen = false } }
+    // The last dream left (promoted): fold the now-empty section. Only on a change (drop the current value), so an
+    // empty archive pulled open on purpose keeps its "None yet" line, also across rotation.
+    LaunchedEffect(Unit) {
+        snapshotFlow { loadedDreams?.isEmpty() }.drop(1).collect { if (it == true && dreamsOpen) settle(false) }
+    }
 
     Scaffold(
         topBar = {
@@ -209,8 +228,10 @@ fun GoalsScreen(vm: GoalsViewModel = viewModel(), resolve: Pair<Long, Boolean>? 
                     DreamsSection(dreams, onCollapse = { settle(false) }, onPromote = { promotingId = it.id })
                 }
             }
-            item { HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant) }
-            items(goals, key = { it.id }) { goal ->
+            if (remindersOff && goals.orEmpty().any { it.status == Status.ACTIVE }) item(key = "reminders") { RemindersOffLine() }
+            item(key = "rule") { HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant) }
+            if (goals?.isEmpty() == true && loadedDreams != null) item(key = "empty") { EmptyLedger(hasDreams = dreams.isNotEmpty()) }
+            items(goals.orEmpty(), key = { it.id }) { goal ->
                 GoalRow(goal, onTick = { resolvingId = goal.id; resolvingAchieved = true })
             }
         }
@@ -219,7 +240,7 @@ fun GoalsScreen(vm: GoalsViewModel = viewModel(), resolve: Pair<Long, Boolean>? 
         AddGoalSheet(onDismiss = { adding = false }, onSave = vm::addGoal)
     }
     // ponytail: null until the first DB emission or if the goal is gone / already resolved, so nothing shows.
-    goals.find { it.id == resolvingId && it.status == Status.ACTIVE }?.let { goal ->
+    goals?.find { it.id == resolvingId && it.status == Status.ACTIVE }?.let { goal ->
         key(goal.id) { // fresh sheet state per goal; a new preselection for an open sheet keeps the typed note
             ResolveSheet(goal, resolvingAchieved, onDismiss = { if (resolvingId == goal.id) resolvingId = null }) { achieved, note ->
                 vm.resolve(goal, achieved, note)
@@ -235,9 +256,46 @@ fun GoalsScreen(vm: GoalsViewModel = viewModel(), resolve: Pair<Long, Boolean>? 
         }
     }
     // Only once the row is really FAILED in the DB (the resolve may be a no-op if something else closed it first).
-    goals.find { it.id == setAgainId && it.status == Status.FAILED }?.let { goal ->
+    goals?.find { it.id == setAgainId && it.status == Status.FAILED }?.let { goal ->
         SetAgainDialog(goal, onDismiss = { setAgainId = null }) { vm.setAgain(goal) }
     }
+}
+
+/** No goals yet: a blank page, not a blank screen. */
+@Composable
+private fun EmptyLedger(hasDreams: Boolean) {
+    Column(Modifier.padding(start = NotebookMargin, end = 24.dp, top = 32.dp)) {
+        Text("A clean page.", style = MaterialTheme.typography.headlineSmall.copy(fontStyle = FontStyle.Italic))
+        Text(
+            if (hasDreams) "Tap + to write down a goal, or give one of your dreams a deadline."
+            else "Tap + to write down your first goal. Leave out the duration and it waits up here as a dream.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 8.dp),
+        )
+    }
+}
+
+/** Notifications are blocked: reminders can't fire. Tap opens the app's notification settings. */
+@Composable
+private fun RemindersOffLine() {
+    val context = LocalContext.current
+    Text(
+        "reminders are off · turn on",
+        style = DateStyle,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier
+            .clickable(onClickLabel = "Open notification settings") {
+                runCatching { // some OEM/kiosk builds lack this screen: fall back to the app's details page, else do nothing
+                    context.startActivity(
+                        Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName),
+                    )
+                }.recoverCatching {
+                    context.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", context.packageName, null)))
+                }
+            }
+            .padding(start = NotebookMargin, end = 24.dp, top = 4.dp, bottom = 12.dp),
+    )
 }
 
 @Composable
@@ -508,9 +566,12 @@ private fun ResolveSheet(
 @Composable
 private fun SetAgainDialog(goal: Goal, onDismiss: () -> Unit, onYes: () -> Unit) {
     val unit = goal.durationUnit!!.name.lowercase().let { if (goal.durationAmount == 1) it.dropLast(1) else it }
+    val shape = RoundedCornerShape(4.dp)
     AlertDialog(
         onDismissRequest = onDismiss,
-        shape = RoundedCornerShape(4.dp),
+        // Hairline edge: in dark mode paper-on-dimmed-paper barely separates otherwise.
+        modifier = Modifier.border(Dp.Hairline, MaterialTheme.colorScheme.outline, shape),
+        shape = shape,
         containerColor = MaterialTheme.colorScheme.background,
         tonalElevation = 0.dp,
         title = { Text("Set this goal again?", style = MaterialTheme.typography.headlineSmall) },

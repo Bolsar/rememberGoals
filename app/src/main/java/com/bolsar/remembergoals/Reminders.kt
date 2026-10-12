@@ -20,7 +20,7 @@ import androidx.work.workDataOf
 import java.util.concurrent.TimeUnit
 
 private const val DAY_MS = 24 * 60 * 60 * 1000L
-private const val CHANNEL = "deadlines"
+const val CHANNEL = "deadlines"
 const val EXTRA_GOAL_ID = "goalId"
 const val EXTRA_ACHIEVED = "achieved"
 
