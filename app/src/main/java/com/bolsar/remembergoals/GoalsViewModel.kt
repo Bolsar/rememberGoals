@@ -15,22 +15,15 @@ class GoalsViewModel(app: Application) : AndroidViewModel(app) {
     val goals: StateFlow<List<Goal>?> = dao.goals().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
     val dreams: StateFlow<List<Goal>?> = dao.dreams().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
-    /** No amount/unit => saved as a dream. */
-    fun addGoal(title: String, description: String?, amount: Int?, unit: DurationUnit?) {
+    /**
+     * Add Goal page closed: [goal] from [pageGoal] (goal, dream or draft) is written over draft [id] (0 = new page).
+     * null = nothing typed: a reopened draft [id] is discarded, a new page saves nothing.
+     */
+    fun savePage(id: Long, goal: Goal?) {
         viewModelScope.launch {
-            val now = System.currentTimeMillis()
-            val deadline = if (amount != null && unit != null) deadlineFrom(now, amount, unit) else null
-            val id = dao.insert(
-                Goal(
-                    title = title,
-                    description = description,
-                    durationAmount = amount.takeIf { deadline != null },
-                    durationUnit = unit.takeIf { deadline != null },
-                    deadline = deadline,
-                    createdAt = now,
-                ),
-            )
-            if (deadline != null) scheduleReminders(getApplication(), id, deadline)
+            if (goal == null) { if (id != 0L) dao.deleteDraft(id); return@launch }
+            val rowId = dao.save(goal)
+            goal.deadline?.let { scheduleReminders(getApplication(), rowId, it) }
         }
     }
 
