@@ -2,8 +2,10 @@ package com.bolsar.remembergoals
 
 import android.content.Intent
 import android.net.Uri
+import android.text.format.DateFormat
 import android.provider.Settings
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.LocalActivity
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -98,6 +100,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -108,6 +111,7 @@ import kotlinx.coroutines.launch
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
+import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.time.temporal.ChronoUnit
 
@@ -116,7 +120,8 @@ private val CardShape = RoundedCornerShape(20.dp)
 // ponytail: the Dreams page shares the Add Goal page's `page: Long?` slot (ids are > 0), so one AnimatedContent swaps both.
 private const val DREAMS_PAGE = -1L
 
-private fun day(millis: Long): LocalDate = Instant.ofEpochMilli(millis).atZone(ZoneId.systemDefault()).toLocalDate()
+private fun zoned(millis: Long): ZonedDateTime = Instant.ofEpochMilli(millis).atZone(ZoneId.systemDefault())
+private fun day(millis: Long): LocalDate = zoned(millis).toLocalDate()
 
 /**
  * [resolve]: (goal id, preselect "Achieved") from a notification — opens the resolve sheet, then [onResolveHandled]
@@ -205,7 +210,7 @@ fun GoalsScreen(
             return@AnimatedContent
         }
         if (shown != null) {
-            AddGoalPage(shown, draft = goals?.find { it.id == shown && it.draft }) { vm.savePage(shown, it); page = null }
+            AddGoalPage(shown, draft = goals?.find { it.id == shown && it.draft }, onSave = vm::savePage) { page = null }
             return@AnimatedContent
         }
         // Ignore taps while the page is still animating out: the same id would revive that closed page's composition.
@@ -332,9 +337,12 @@ private fun RemindersOffLine() {
 private fun GoalCardView(goal: Goal, now: Long, highlighted: Boolean, onTick: () -> Unit) {
     val deadline = goal.deadline!!
     val overdue = goal.status == Status.ACTIVE && deadline < now
-    val base = MaterialTheme.colorScheme.tone(goal.status, overdue).first
-    val muted = mutedOn(goal.status != Status.ACTIVE || overdue)
-    val bg by animateColorAsState(if (highlighted) lerp(base, MaterialTheme.colorScheme.primary, 0.22f) else base, spring(), label = "card")
+    val tinted = goal.status != Status.ACTIVE || overdue
+    val (base, strong) = MaterialTheme.colorScheme.tone(goal.status, overdue)
+    val muted = mutedOn(tinted)
+    // Pulse toward the card's own strong hue (blue on a plain card): mixing blue into orange/green read as grey.
+    val pulse = if (tinted) strong else MaterialTheme.colorScheme.primary
+    val bg by animateColorAsState(if (highlighted) lerp(base, pulse, 0.3f) else base, spring(), label = "card")
     val left = ChronoUnit.DAYS.between(day(now), day(deadline))
     val countdown = when {
         goal.status != Status.ACTIVE -> null
@@ -371,7 +379,8 @@ private fun EventRow(event: GoalEvent, onShowGoal: () -> Unit) {
     val goal = event.goal
     val status = if (event.overdue) Status.ACTIVE else goal.status // ACTIVE + overdue = the orange "deadline passed" tone
     val bg = MaterialTheme.colorScheme.tone(status, event.overdue).first
-    val date = day(event.time).format(dateFormat)
+    val clock = if (DateFormat.is24HourFormat(LocalContext.current)) "HH:mm" else "h:mm a" // the user's 12/24h setting
+    val date = zoned(event.time).format(DateTimeFormatter.ofPattern("d MMM yyyy, $clock"))
     val meta = when (status) {
         Status.ACTIVE -> "Overdue · $date"
         Status.ACHIEVED -> "Achieved · $date" + if (day(event.time) < day(goal.deadline!!)) " · early" else ""
@@ -494,10 +503,11 @@ private fun DraftCardView(goal: Goal, onClick: () -> Unit) {
 /**
  * Full Add Goal page. [id] 0 = new, else [draft] reopened (it prefills the fields once; after that the saveable fields
  * win, also across rotation and process death). Add => [onClose] with a goal/dream; back (system or arrow) => a draft,
- * or null when nothing was typed. See [pageGoal].
+ * or null when nothing was typed. See [pageGoal]. The app going to the background writes the draft right away, so a
+ * swipe from Recents keeps it; [onSave] finds that row again by the saveable createdAt, so nothing is duplicated.
  */
 @Composable
-private fun AddGoalPage(id: Long, draft: Goal?, onClose: (Goal?) -> Unit) {
+private fun AddGoalPage(id: Long, draft: Goal?, onSave: (id: Long, createdAt: Long, Goal?) -> Unit, onClose: () -> Unit) {
     var title by rememberSaveable { mutableStateOf(draft?.title.orEmpty()) }
     var amount by rememberSaveable { mutableStateOf(draft?.durationAmount?.toString().orEmpty()) }
     var unit by rememberSaveable { mutableStateOf(draft?.durationUnit ?: DurationUnit.DAYS) }
@@ -506,12 +516,17 @@ private fun AddGoalPage(id: Long, draft: Goal?, onClose: (Goal?) -> Unit) {
     var tried by rememberSaveable { mutableStateOf(false) }
     var closed by remember { mutableStateOf(false) } // closes once: Add / back during the exit animation do nothing
     val amountError = amount.toIntOrNull() == 0 // digits-only, max 3 chars => null or 0..999
+    fun save(add: Boolean) = onSave(id, createdAt, pageGoal(id, createdAt, title, description, amount, unit, System.currentTimeMillis(), draft = !add))
     fun close(add: Boolean) {
         if (closed) return
         closed = true
-        onClose(pageGoal(id, createdAt, title, description, amount, unit, System.currentTimeMillis(), draft = !add))
+        save(add)
+        onClose()
     }
     BackHandler(!closed) { close(add = false) }
+    // Backgrounded (not a rotation): keep what's typed as a draft now, in case the process is killed or swiped away.
+    val activity = LocalActivity.current
+    LifecycleEventEffect(Lifecycle.Event.ON_STOP) { if (!closed && activity?.isChangingConfigurations != true) save(add = false) }
 
     val scheme = MaterialTheme.colorScheme
     Surface(color = scheme.background) { Column(Modifier.fillMaxSize().safeDrawingPadding()) { // Surface: ink text color
