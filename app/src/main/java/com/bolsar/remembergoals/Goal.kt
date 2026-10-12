@@ -51,6 +51,22 @@ fun pageGoal(
     )
 }
 
+/**
+ * Edit page "Save" on an ACTIVE goal: same start (createdAt), so the card keeps its place; the deadline is re-counted
+ * from that start. null = invalid (blank title, or no amount: a goal can't lose its duration here).
+ */
+fun Goal.edited(title: String, description: String, amount: String, unit: DurationUnit): Goal? {
+    val n = amount.toIntOrNull()?.takeIf { it > 0 } ?: return null
+    if (title.isBlank()) return null
+    return copy(
+        title = title.trim(),
+        description = description.trim().ifBlank { null },
+        durationAmount = n,
+        durationUnit = unit,
+        deadline = deadlineFrom(createdAt, n, unit),
+    )
+}
+
 /** Calendar-aware: +1 month from Jan 31 is Feb 28/29, days survive DST shifts. */
 fun deadlineFrom(start: Long, amount: Int, unit: DurationUnit, zone: ZoneId = ZoneId.systemDefault()): Long =
     Instant.ofEpochMilli(start).atZone(zone).plus(amount.toLong(), unit.chrono).toInstant().toEpochMilli()

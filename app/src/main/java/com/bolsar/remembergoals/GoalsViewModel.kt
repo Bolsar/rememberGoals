@@ -28,6 +28,15 @@ class GoalsViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** [goal] from [Goal.edited]. Only ACTIVE goals (a goal resolved meanwhile stays as it was). Reminders follow the new deadline. */
+    fun edit(goal: Goal) {
+        viewModelScope.launch {
+            if (dao.edit(goal.id, goal.title, goal.description, goal.durationAmount!!, goal.durationUnit!!, goal.deadline!!) == 0) return@launch
+            cancelReminders(getApplication(), goal.id) // an old "pre" may no longer fit before the new deadline
+            scheduleReminders(getApplication(), goal.id, goal.deadline)
+        }
+    }
+
     /** Only ACTIVE goals; no-op otherwise. Caller must ensure [note] is not blank. */
     fun resolve(goal: Goal, achieved: Boolean, note: String) {
         viewModelScope.launch {
