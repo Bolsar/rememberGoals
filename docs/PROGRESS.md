@@ -49,7 +49,7 @@ Goal(
 ```
 Room + Flow. Re-set = insert copy with deadline = now + same duration; old FAILED row untouched.
 
-## Design direction (MANDATORY for all UI work)
+## Design direction v1 (SUPERSEDED by "Redesign v2" at the end of this file — do not follow)
 
 The app must NOT look generic / "AI slop": no default Material purple, no dynamic color, no stock rounded elevated
 cards, no gradients, no shadows, no emoji.
@@ -566,3 +566,87 @@ kept), light + dark paper theme, app icon, empty state, README.
 
 **Deliberately skipped**: a repository/DI layer, a navigation library, `collectAsStateWithLifecycle`, velocity-based
 snapping for the pull, backup/sync, widgets, statistics, string resources, legacy PNG launcher icons.
+
+## Redesign v2 (MANDATORY, supersedes "Design direction v1" and the v1 spec where they conflict)
+
+User request (2026-10-12), verbatim intent:
+- Drop the current paper-ledger design completely. Rounded card style, smooth animation.
+- Goal achieved => card on a green surface; not achieved => red surface; overdue (deadline passed, still ACTIVE) => orange.
+- Telegram archive for dreams, one-to-one with Telegram (see "Telegram archive reference" below).
+- A goal, once set, stays where it is in the list. It never moves. When it is achieved, not achieved or goes overdue, a
+  NEW row is added on top of the list: the note, a ticked box, and a reference to the goal. Tapping the reference
+  auto-scrolls down to the goal (and briefly highlights it).
+- `+` opens a full page (not a bottom sheet). Leaving the Add Goal page without tapping the add button saves it as a
+  draft (only if something was typed). Drafts are shown with their own color and a badge "Complete the goal"; tapping a
+  draft reopens the page prefilled; adding it turns it into a normal goal / dream.
+
+User decisions (asked):
+- Status color goes on BOTH the new top event row AND the original goal card (original card keeps its text and position,
+  only the background surface changes).
+- Overdue is not final: when the deadline passes an orange OVERDUE event row appears on top; the goal can still be
+  resolved later, which adds another (green/red) event row on top.
+
+### Data / list model (ponytail: derive, don't store)
+- Events are DERIVED from goals, no event table:
+  - OVERDUE event at `deadline`, if `deadline < now` and (status ACTIVE, or `resolvedAt > deadline`).
+  - ACHIEVED / FAILED event at `resolvedAt` with `note`.
+- The list = goal cards (time = `createdAt`) + event rows (time = event time), merged, sorted newest first. So new events
+  land on top and goal cards never move. A pure function `timeline(goals, now): List<Entry>` in `Goal.kt` + unit test.
+- Drafts: one new column `draft: Boolean` (DB version 2, a real `Migration(1, 2)` adding
+  `draft INTEGER NOT NULL DEFAULT 0`; never destructive). Drafts have nullable/partial fields as typed; a draft with a
+  duration has its deadline computed only when completed. Drafts are listed in the main list (by `createdAt`), not in dreams.
+- Card surface: ACHIEVED green, FAILED red, ACTIVE+overdue orange, draft = draft color, else neutral card.
+- Overdue must also show without the app being reopened at the exact time: recompute "now" on resume and once a minute
+  while visible is enough (no new worker).
+
+### Visual direction v2
+Still not generic Material: no default purple, no dynamic color. Clean, soft, rounded, calm.
+- Cards: `RoundedCornerShape(20.dp)`, 16.dp side gutter, 10.dp gap between cards, flat tonal surfaces (no shadow or
+  1.dp tonal at most), 16.dp inner padding.
+- Palette (put in `ui/theme/Color.kt`, replace the old one; Theme maps it):
+  - Light: background `#F2F3F5`, card `#FFFFFF`, ink `#15171A`, muted `#6B7280`, accent `#2F6BFF` (FAB, links, Telegram
+    archive accent), achieved surface `#DDF3E4` / strong `#1F9D55`, failed `#FBE1E1` / `#D93A3A`, overdue `#FDEBD5` /
+    `#E07B12`, draft `#EEE9FF` / `#7C5CFF`, archive (dreams) grey `#E4E6EA`.
+  - Dark: background `#0F1114`, card `#1A1D21`, ink `#ECEEF1`, muted `#9AA1AC`, accent `#5B8CFF`, achieved `#12301F` /
+    `#4CC27E`, failed `#3A1717` / `#F06A6A`, overdue `#3A2610` / `#F2A04B`, draft `#261F45` / `#A68BFF`, archive `#24272C`.
+- Type: drop Instrument Serif and JetBrains Mono (delete `res/font/*`, `LICENSES/OFL-1.1.txt`, README mentions). Platform
+  sans with deliberate weights: screen title 32sp SemiBold, card title 17sp SemiBold, meta 13sp Medium muted, body 15sp.
+- Tick box: rounded square (6.dp corners), animated check drawn with a path that strokes in; status color fill.
+- Event row: smaller rounded card on the status surface: ticked box, the note (or "Deadline passed" for overdue), and a
+  reference chip "↳ <goal title>" that scrolls to the goal card (`animateScrollToItem` + highlight pulse ~600ms).
+- Motion: smooth, spring-based. `Modifier.animateItem()` on list items, `animateColorAsState` for surfaces, page
+  transition for Add Goal (slide up + fade, `AnimatedContent`/`AnimatedVisibility`, no navigation library), FAB scale.
+- App icon: redraw in the new style (rounded tick on accent).
+
+### Telegram archive reference (Android, DrKLO/Telegram `PullForegroundDrawable.java` + `DialogsActivity`)
+Implement dreams as Telegram's "Archived Chats" row, one-to-one:
+- The archive row is the first list item, the same height as a chat row, with its own grey background. States:
+  **hidden** (scrolled just above the top, not visible) and **pinned** (visible as a normal row at the top).
+- Hidden + pull down at the top: the row is revealed from the top as you pull. Drawn while pulling: a grey background, a
+  small white circle (radius 9dp) at the left (start padding 28dp) near the bottom of the revealed area with a down arrow
+  in it, and a rounded vertical pill (width 18dp, alpha 0.4) growing from the top of the revealed area down to the circle.
+  Centered text "Swipe down for archive".
+- At `SNAP_HEIGHT = 0.85` of the row height: arrow rotates 180° (250ms, ease both), the accent color reveals as a circle
+  expanding from the small circle across the row, and the text swaps (scale + fade cross-fade) to "Release for archive".
+  Dragging back below 0.85 reverses all of it.
+- Release past 0.85: the row snaps to fully visible (**pinned**); the small circle grows/moves into the archive avatar
+  (circle with archive icon) of the row ("out" animation with a slight bounce), and the row shows "Dreams" + a preview of
+  dream titles + count, like Telegram's archive row. Release below: snaps back to hidden.
+- Pinned row: swipe it left to hide it again (Telegram "Swipe left on the archive to hide it"); a short hint
+  "Swipe down to see the dreams" may show once after hiding. Scrolling the list normally keeps the row as a list item.
+- Tapping the archive row opens the Dreams page (full page, back arrow), listing dreams as cards, each with Promote.
+  Promote keeps the existing duration picker flow (as a sheet or inline, rounded style).
+- If there are no dreams the archive row does not exist (Telegram hides the archive when it's empty).
+- Accessibility: hidden row is not in semantics; TalkBack action "Show dreams" exists on the list.
+
+### Chunks v2 (one fresh agent per chunk, sequential; same PR flow and build gate as before)
+8. **v2-cards-timeline** — new theme (palette, type, fonts removed), rounded cards, status surfaces, derived timeline
+   with event rows + reference scroll-to-goal + highlight, animations on list items, `draft` column + Migration(1,2)
+   (column only; drafts UI is chunk 9), `timeline()` unit test. Existing sheets restyled to rounded just enough to not
+   clash. Dreams archive may keep the old reveal temporarily (restyled).
+9. **v2-add-page-drafts** — Add Goal full page with transition, draft-on-leave (system back / back arrow / app
+   background-kill safe via saving on leave), draft card with badge "Complete the goal", tap to reopen prefilled,
+   complete => goal or dream. Unit test for draft save/complete logic where non-trivial.
+10. **v2-telegram-archive** — dreams as Telegram archive row exactly per the reference above, Dreams page, promote.
+11. **v2-polish** — new app icon, README + screenshots rewritten for v2, whole-repo `ponytail-audit` + `code-review`,
+    emulator walkthrough light + dark, Status section updated.

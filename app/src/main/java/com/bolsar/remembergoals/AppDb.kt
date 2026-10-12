@@ -7,14 +7,16 @@ import androidx.room.Insert
 import androidx.room.Query
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface GoalDao {
-    @Query("SELECT * FROM Goal WHERE deadline IS NOT NULL ORDER BY createdAt DESC, id DESC")
+    @Query("SELECT * FROM Goal WHERE deadline IS NOT NULL AND draft = 0 ORDER BY createdAt DESC, id DESC")
     fun goals(): Flow<List<Goal>>
 
-    @Query("SELECT * FROM Goal WHERE deadline IS NULL ORDER BY createdAt DESC, id DESC")
+    @Query("SELECT * FROM Goal WHERE deadline IS NULL AND draft = 0 ORDER BY createdAt DESC, id DESC")
     fun dreams(): Flow<List<Goal>>
 
     @Query("SELECT * FROM Goal WHERE id = :id")
@@ -32,7 +34,7 @@ interface GoalDao {
     suspend fun promote(id: Long, amount: Int, unit: DurationUnit, deadline: Long, now: Long): Int
 }
 
-@Database(entities = [Goal::class], version = 1, exportSchema = false)
+@Database(entities = [Goal::class], version = 2, exportSchema = false)
 abstract class AppDb : RoomDatabase() {
     abstract fun goalDao(): GoalDao
 
@@ -40,8 +42,15 @@ abstract class AppDb : RoomDatabase() {
         @Volatile private var instance: AppDb? = null
 
         fun get(context: Context): AppDb = instance ?: synchronized(this) {
-            instance ?: Room.databaseBuilder(context.applicationContext, AppDb::class.java, "goals.db").build()
+            instance ?: Room.databaseBuilder(context.applicationContext, AppDb::class.java, "goals.db")
+                .addMigrations(MIGRATION_1_2)
+                .build()
                 .also { instance = it }
         }
     }
+}
+
+/** v2: drafts. Column only, existing rows become non-drafts. Never destructive. */
+val MIGRATION_1_2 = object : Migration(1, 2) {
+    override fun migrate(db: SupportSQLiteDatabase) = db.execSQL("ALTER TABLE Goal ADD COLUMN draft INTEGER NOT NULL DEFAULT 0")
 }
