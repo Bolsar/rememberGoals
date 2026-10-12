@@ -11,8 +11,9 @@ import kotlinx.coroutines.launch
 class GoalsViewModel(app: Application) : AndroidViewModel(app) {
     private val dao = AppDb.get(app).goalDao()
 
-    val goals: StateFlow<List<Goal>> = dao.goals().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
-    val dreams: StateFlow<List<Goal>> = dao.dreams().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    // null until the first DB emission, so the UI can tell "loading" from "none yet".
+    val goals: StateFlow<List<Goal>?> = dao.goals().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+    val dreams: StateFlow<List<Goal>?> = dao.dreams().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
     /** No amount/unit => saved as a dream. */
     fun addGoal(title: String, description: String?, amount: Int?, unit: DurationUnit?) {

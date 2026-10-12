@@ -12,12 +12,15 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import com.bolsar.remembergoals.ui.theme.RememberGoalsTheme
 
 class MainActivity : ComponentActivity() {
     /** (goal id, preselect "Achieved") from a notification; GoalsScreen clears it once the sheet is open. */
     private var resolve by mutableStateOf<Pair<Long, Boolean>?>(null)
+    /** Re-read on every resume: covers the permission prompt closing and a trip to the system settings. */
+    private var remindersOff by mutableStateOf(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -28,7 +31,15 @@ class MainActivity : ComponentActivity() {
         if (savedInstanceState == null && Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) registerForActivityResult(ActivityResultContracts.RequestPermission()) {}.launch(Manifest.permission.POST_NOTIFICATIONS)
-        setContent { RememberGoalsTheme { GoalsScreen(resolve = resolve, onResolveHandled = { resolve = null }) } }
+        setContent { RememberGoalsTheme { GoalsScreen(resolve = resolve, onResolveHandled = { resolve = null }, remindersOff = remindersOff) } }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        val nm = NotificationManagerCompat.from(this)
+        // App-wide switch, or just the "Deadlines" category turned off (the channel exists after the first reminder).
+        remindersOff = !nm.areNotificationsEnabled() ||
+            nm.getNotificationChannelCompat(CHANNEL)?.importance == NotificationManagerCompat.IMPORTANCE_NONE
     }
 
     override fun onNewIntent(intent: Intent) {

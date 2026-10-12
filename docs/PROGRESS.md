@@ -236,6 +236,14 @@ JUnit 4.13.2. compileSdk = targetSdk = 37 (highest installed: `android-37.0`), m
   Chunk 7: add one only after the first DB emission (e.g. make the initial value `null`).
 - `collectAsState` (not `...WithLifecycle`): no `lifecycle-runtime-compose` dep. Fine for one screen.
 
+**Diff review fixes** (`ponytail:ponytail-review`: lean already; `code-review` medium: 4 findings)
+- Fixed: the fold effect also ran on first composition, so rotation folded an empty archive opened on purpose ->
+  `snapshotFlow … .drop(1)`.
+- Fixed: the settings fallback `startActivity` was unguarded -> `recoverCatching` (does nothing if both are missing).
+- Fixed: the icon's tick tip poked ~0.4dp outside the 66dp safe zone -> moved in 1dp.
+- Skipped: a blocked channel *group* isn't detected (the app has no channel groups); a channel switched off from the
+  first notification's long-press shows the hint only on the next resume (that is what `onResume` covers).
+
 **Verified on emulator** (Small_Phone AVD, light + dark): list rows, all three tick states (checked with a temporary
 resolve hack, which has been reverted), the name error, the dream hint and due preview, dreams hidden from the list,
 keyboard + sheet scrolling.
@@ -482,3 +490,79 @@ set again -> new `-due` work for the new id.
   the notification stays until the goal is really resolved, since the note is still required); permission asked on
   launch (task allowed it; the system stops asking after two denials); channel created per run (idempotent, cheap);
   centralizing schedule/cancel in a data layer (4 call sites, no repository by decision).
+
+## Chunk 7 — polish
+
+**What changed**: empty state, adaptive app icon, the chunk 5/6 known issues, README + font license, two unused
+dependencies removed, whole-repo audit + review fixes, end-to-end walkthrough.
+
+**Files**
+- `GoalsViewModel.kt`: `goals` and `dreams` are `StateFlow<List<Goal>?>`, `null` until the first DB emission.
+- `GoalsScreen.kt`:
+  - `EmptyLedger(hasDreams)` (item key `"empty"`): italic serif "A clean page." + faint hint ("Tap + to write down your
+    first goal…", or "…or give one of your dreams a deadline." when dreams exist). Shown only once both flows have
+    emitted and there are no goals, so it never flashes on launch.
+  - `RemindersOffLine()` (key `"reminders"`): faint mono "reminders are off · turn on" above the ledger rule, only while
+    notifications are blocked AND some goal is ACTIVE. Tap opens `ACTION_APP_NOTIFICATION_SETTINGS` (falls back to
+    the app details page if that screen is missing).
+  - `snapshotFlow { loadedDreams?.isEmpty() }.drop(1)`: when the dreams list becomes empty while open (last dream
+    promoted), it folds via `settle(false)`. Only on a change, so an empty archive pulled open on purpose keeps its
+    "None yet" line, also across rotation.
+  - `SetAgainDialog`: hairline `outline` border (`Modifier.border(Dp.Hairline, …)` on the `AlertDialog` modifier). It
+    separates the dialog from the scrim in dark mode. No custom `Dialog` needed.
+  - Stable keys on the rule/empty/reminders items.
+- `MainActivity.kt`: `remindersOff` state, re-read in `onResume` (after the permission prompt or a settings trip):
+  app notifications disabled, or the `deadlines` channel set to `IMPORTANCE_NONE`.
+- `Reminders.kt`: `CHANNEL` is now public (MainActivity reads it).
+- Icon: `res/drawable/ic_launcher_foreground.xml` (ink tick box, vermilion hand tick that overshoots the box, faint ruled
+  line, inside the 66dp safe zone) + `res/mipmap-anydpi/ic_launcher.xml` (adaptive: `@color/paper` background, the same
+  vector as foreground and monochrome layer, since themed icons only use alpha). `android:icon` in the manifest.
+  The notification header now shows it too (the chunk 6 large-icon issue is gone). Lint `MissingApplicationIcon` gone.
+- `README.md` (spec in plain words, build/run, stack, design notes, screenshots), `docs/screenshots/*.png`,
+  `LICENSES/OFL-1.1.txt` (OFL 1.1 + copyright lines for Instrument Serif and JetBrains Mono). The license can't live in
+  `res/font` (aapt rejects non-font files there).
+- Gradle: removed `material-icons-extended` (never used; icons are hand-drawn) and `room-ktx` (merged into
+  `room-runtime` since Room 2.7).
+
+**Decisions**
+- strings.xml: **skipped**. Single-locale app, all copy lives next to its Compose code, and ~40 moves to `stringResource`
+  would be churn without a translation in sight. Do it with the first translation.
+- No `roundIcon`/legacy PNG mipmaps: minSdk 26, the adaptive icon covers every launcher.
+
+**Whole-repo audit** (`ponytail:ponytail-audit`): unused `material-icons-extended`, redundant `room-ktx` (both
+removed). Everything else lean (flat files, no layers, DAO direct). net: -2 deps.
+
+**Whole-repo review** (`code-review` medium on `app/src/main/java`, 7 findings, all fixed)
+- A blocked "Deadlines" channel wasn't detected -> channel importance check.
+- `startActivity(ACTION_APP_NOTIFICATION_SETTINGS)` could crash on builds without it -> `runCatching` + fallback.
+- Fold-after-promote used a stale `dreams.size` and folded even on a no-op promote -> state-driven `LaunchedEffect`.
+- First-run copy shown to users who have dreams -> `hasDreams` copy.
+- Un-keyed conditional items shifted positional keys -> stable keys.
+- `dreams` started as `emptyList()` while `goals` was nullable (pill pop-in) -> both nullable, empty state waits for both.
+
+**Verified on emulator** (Small_Phone API 37, light + dark): permission denied -> hint shows with an ACTIVE goal, tap
+opens the app notification settings, granting hides it on return; empty state (with and without dreams); add goal
+(2 weeks) + 1-day goal + 2 dreams; pull reveals dreams; promote both, the last one folds the section; tick -> blank
+note error -> achieved early with note; forced `goal-2-due` job -> notification with the new icon -> "Not achieved" ->
+sheet preselected -> note -> red X -> set again -> new row on top, old FAILED row kept; dark-mode dialog hairline;
+launcher icon; after the review fixes: last-promote fold again, and an empty archive opened on purpose survives rotation. Final screenshots: `docs/screenshots/ledger-light.png`, `ledger-dark.png`, `dreams.png`.
+
+## Status
+
+**Done**: the full spec. Goals ledger (newest first), Add Goal (name, optional amount+unit, description), dreams hidden
+above the list with pull-to-reveal and promote, tick -> required note -> ACHIEVED with date and "early", reminders a day
+before and at the deadline with Achieved / Not achieved actions, FAILED red X + note + "Set again?" (new row, old row
+kept), light + dark paper theme, app icon, empty state, README.
+
+**Known limitations**
+- Goals and dreams can't be edited or deleted (not in the spec).
+- Countdowns and the due preview use the date at composition, so they go stale past midnight until the next recomposition.
+- "pre" is exactly 24h before the deadline, not calendar-day aware across DST.
+- Rotation while half-pulled resets the pull; mouse-wheel scrolling can leave a half pull (phone-only app).
+- All dreams are one lazy item (fine for a personal list).
+- Reminders for goals created before chunk 6 were never scheduled (pre-release, no users).
+- English only; strings are inline (see Decisions).
+- DB is `version = 1` with no migrations. A schema change needs a Migration or destructive fallback.
+
+**Deliberately skipped**: a repository/DI layer, a navigation library, `collectAsStateWithLifecycle`, velocity-based
+snapping for the pull, backup/sync, widgets, statistics, string resources, legacy PNG launcher icons.

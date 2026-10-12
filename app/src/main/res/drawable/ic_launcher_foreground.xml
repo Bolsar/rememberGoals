@@ -1,0 +1,22 @@
+<!-- Launcher mark: an ink ledger tick box, ticked in vermilion, on a faint ruled line. 108dp adaptive canvas,
+     everything inside the 66dp safe zone. Also the monochrome (themed) layer: there only alpha counts. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:pathData="M32,79h44"
+        android:strokeColor="#331C1A17"
+        android:strokeWidth="1.5" />
+    <path
+        android:pathData="M35,39h34v34h-34z"
+        android:strokeColor="#FF1C1A17"
+        android:strokeWidth="4" />
+    <path
+        android:pathData="M41,56l10,10l24,-32"
+        android:strokeColor="#FFD2452B"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:strokeWidth="6" />
+</vector>
