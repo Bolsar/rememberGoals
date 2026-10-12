@@ -549,23 +549,32 @@ launcher icon; after the review fixes: last-promote fold again, and an empty arc
 
 ## Status
 
-**Done**: the full spec. Goals ledger (newest first), Add Goal (name, optional amount+unit, description), dreams hidden
-above the list with pull-to-reveal and promote, tick -> required note -> ACHIEVED with date and "early", reminders a day
-before and at the deadline with Achieved / Not achieved actions, FAILED red X + note + "Set again?" (new row, old row
-kept), light + dark paper theme, app icon, empty state, README.
+**Done (v2, chunks 8–11)**: the full spec plus the v2 redesign.
+- Rounded cards with status surfaces: green achieved, red not achieved, orange overdue, purple draft.
+- Goal cards never move. Derived event rows (overdue / achieved / not achieved, with date + time and the note) land
+  on top, with a `↳` chip that scrolls to the goal and pulses it.
+- A full Add Goal page with slide transition. Leaving without Add saves a draft: back, arrow, and going to the
+  background (survives a Recents swipe or process death, no duplicates). Draft cards reopen the page prefilled.
+- Dreams as Telegram's archive row: hidden / shown / pinned, pull drawable, swipe to pin/hide, a Dreams page with
+  Promote.
+- Tick → required note → resolve, and "Set again?" after a fail.
+- Reminders a day before and at the deadline, with Achieved / Not achieved actions.
+- Light + dark theme, v2 adaptive + monochrome app icon, README + screenshots.
 
 **Known limitations**
-- Goals and dreams can't be edited or deleted (not in the spec).
-- Countdowns and the due preview use the date at composition, so they go stale past midnight until the next recomposition.
+- Goals and dreams can't be edited or deleted. A draft is discarded by emptying it, with no confirmation or undo.
+- Process death in the background is covered. A rotation does not write a draft (saved state covers it).
+- Countdowns and the due preview use the date at composition. "now" refreshes on resume and once a minute.
 - "pre" is exactly 24h before the deadline, not calendar-day aware across DST.
-- Rotation while half-pulled resets the pull; mouse-wheel scrolling can leave a half pull (phone-only app).
-- All dreams are one lazy item (fine for a personal list).
-- Reminders for goals created before chunk 6 were never scheduled (pre-release, no users).
-- English only; strings are inline (see Decisions).
-- DB is `version = 1` with no migrations. A schema change needs a Migration or destructive fallback.
+- Mouse-wheel scrolling at the top can leave a half pull of the archive (phone-only app).
+- All dreams go into one row preview and a plain page (fine for a personal list).
+- English only. Strings are inline.
+- TalkBack custom actions ("Show dreams", "Pin in the list" / "Hide above the list") exist in code. TalkBack focuses
+  the row on the emulator, but the action menu could not be opened via adb (see chunk 11).
 
-**Deliberately skipped**: a repository/DI layer, a navigation library, `collectAsStateWithLifecycle`, velocity-based
-snapping for the pull, backup/sync, widgets, statistics, string resources, legacy PNG launcher icons.
+**Deliberately skipped**: a repository/DI layer, a navigation library, `collectAsStateWithLifecycle`, an event table
+(events are derived), velocity-based snapping, Telegram's long-press menu / Lottie icons / undo toast on every hide,
+backup/sync, widgets, statistics, string resources, legacy PNG launcher icons, Room schema export + migration tests.
 
 ## Redesign v2 (MANDATORY, supersedes "Design direction v1" and the v1 spec where they conflict)
 
@@ -949,3 +958,83 @@ Other Telegram behaviour kept:
 - The mouse-wheel half-pull caveat from chunk 5 still applies (`ponytail:` comment).
 - README/screenshots still describe the old dreams section (chunk 11 rewrites them).
 - The emulator DB now also has the goals "Sail" and "Learn to sail" (promoted) and the dream "Climb Kilimanjaro".
+
+## Chunk 11 — v2-polish
+
+**What changed**: drafts now survive a Recents swipe. There is a new v2 app icon, the highlight pulse reads on every
+surface, and event rows show the time. README and screenshots are rewritten for v2. Ran a whole-repo audit and review,
+did an emulator walkthrough in light + dark, and updated the Status section.
+
+**Files**
+- `AppDb.kt`:
+  - `draftIdAt(createdAt)` finds the draft a page already wrote.
+  - `@Transaction savePage(goal, createdAt)` keeps an existing id, or else uses the draft found at the page's
+    `createdAt`, or else 0 (insert), then REPLACEs.
+  - `deletePageDraft(id, createdAt)` replaces `deleteDraft(id)`.
+- `GoalsViewModel.kt`: `savePage(id, createdAt, goal?)`. It is async and safe to repeat: null deletes the page's
+  draft, otherwise it calls `dao.savePage` and schedules reminders.
+- `GoalsScreen.kt`:
+  - `AddGoalPage(id, draft, onSave, onClose)`: `LifecycleEventEffect(ON_STOP)` saves the page as a draft. This is
+    skipped while closed and during configuration changes (`LocalActivity.current.isChangingConfigurations`).
+  - The page already kept `createdAt` in saved state. That makes it the page's stable key: every later save (leave,
+    Add, another background) finds the same row, even after process death, and never duplicates it.
+  - Pulse: the card lerps 30% toward its own strong colour (green, red or orange; blue on a plain card) instead of
+    22% toward blue, which read as grey on orange.
+  - Event meta shows `d MMM yyyy, HH:mm`, or `h:mm a` when the system is set to 12h (`DateFormat.is24HourFormat`).
+    A new `zoned(millis)` helper is shared with `day()`.
+- Icon: `res/drawable/ic_launcher_foreground.xml` is now a white rounded square (10dp corners, 5dp stroke) with a
+  rounded check, inside the 66dp safe zone. It has no fills, so it doubles as the monochrome layer. The adaptive
+  background is the new `@color/accent` (#2F6BFF, `values/themes.xml`), the same in both modes.
+- `README.md` rewritten for v2: event rows, drafts, Telegram-style archive, design notes v2, no font license.
+- `docs/screenshots/`: `goals-light.png`, `goals-dark.png`, `archive-pull.png` (past 0.85, "Release for dreams"),
+  `dreams-page.png`. Deleted the v1 `ledger-light.png`, `ledger-dark.png` and `dreams.png`.
+  The screenshots use realistic sample data, seeded by pulling `goals.db` and inserting rows with host-side Python
+  `sqlite3`. That is the only way to get past deadlines and resolved dates without waiting.
+
+**Decisions**
+- Background save: async and safe to repeat (keyed on the saved `createdAt`), not a blocking write that feeds the id
+  back. The first version used `runBlocking` on ON_STOP. Review flagged main-thread I/O, an ANR risk, and fragile
+  ordering against `onSaveInstanceState`.
+- An emptied page sent to the background deletes its draft, the same as leaving it empty.
+
+**Whole-repo audit** (`ponytail:ponytail-audit`): lean already. `Archive.kt` is large, but it is the requested
+one-to-one Telegram port. Every theme slot is set on purpose (no purple leak). Nothing to cut.
+
+**Review** (`code-review` medium on `app/src/main/java`. Note: the skill reviewed the working-tree diff, not every file;
+chunks 7–10 each had their own review.) 7 findings, 6 fixed:
+- Fixed: `runBlocking` Room write on ON_STOP (ANR risk) -> async write, safe to repeat.
+- Fixed: rotation wrote a draft -> skipped on configuration changes.
+- Fixed: emptying a background-saved page and then being killed brought the old draft back -> a null page deletes
+  its draft.
+- Fixed: hard-coded 24h time -> follows the system 12/24h setting.
+- Fixed: pulse colour chosen by a `Color.Transparent` sentinel -> an explicit `tinted` flag.
+- Fixed: duplicated millis -> zone conversion -> `zoned()`.
+- (The "fragile ordering" altitude note was solved by the same rewrite.)
+
+**Verified on emulator** (Small_Phone API 37, 720x1280, light + dark)
+- Drafts, after the final fix:
+  - New page -> Home -> task removed (`am stack remove`, same as a Recents swipe) -> the draft is in the list.
+  - A reopened draft edited -> Recents swipe -> updated in place.
+  - New page -> Home -> back -> more text -> leave => one draft with all the text.
+  - Background -> clear the fields -> Home -> `am kill` + task removed => no draft left.
+  - Before the rewrite, process death with a restored page also kept a single draft.
+- Pulse on an orange card (`screenrecord` frames): it now deepens to a darker orange.
+- Event rows show the time.
+- The splash and Recents show the new icon.
+- Chunk 10 leftover: on a short list (clean data, 1 goal + 1 dream), a pulled-out row can be dragged away. A big drag
+  hides it, and a small drag snaps it back to shown.
+- Chunk 10 leftover, TalkBack: with TalkBack on, the archive row is one focusable node ("Dreams", preview, count). The
+  custom actions could not be listed. `uiautomator dump` doesn't include actions, and the TalkBack menu gesture (L
+  swipe / three-finger tap) can't be injected with `adb shell input` (no root for `sendevent`). The code sets them
+  (`customActions` on the list and row).
+- Walkthrough:
+  - Add a dream + a 2-week goal.
+  - Pull the archive.
+  - Tick -> blank note error -> Not achieved + note -> a red event row with time, and the card turns red.
+  - Set again -> a new card on top.
+  - Dark mode: Dreams page -> Promote 5 days -> the goal on top. The page closes and the row disappears (last dream).
+- Auto-rotate restored to on. The emulator is left with the screenshot sample data.
+
+**Known issues**
+- TalkBack custom actions not verified on a device (see above).
+- The `code-review` skill only reviewed this chunk's diff, not the whole tree.

@@ -8,6 +8,7 @@ import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.Transaction
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import kotlinx.coroutines.flow.Flow
@@ -31,8 +32,21 @@ interface GoalDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun save(goal: Goal): Long
 
-    @Query("DELETE FROM Goal WHERE id = :id AND draft = 1")
-    suspend fun deleteDraft(id: Long)
+    @Query("SELECT id FROM Goal WHERE draft = 1 AND createdAt = :createdAt LIMIT 1")
+    suspend fun draftIdAt(createdAt: Long): Long?
+
+    /**
+     * Add Goal page write, idempotent: a page that already left a draft (a background save, before or after process
+     * death) is found by its saved [createdAt] when it has no id, so repeated saves update that one row.
+     * One transaction: two quick saves can't both miss the lookup and insert twice.
+     */
+    @Transaction
+    suspend fun savePage(goal: Goal, createdAt: Long): Long =
+        save(goal.copy(id = goal.id.takeIf { it != 0L } ?: draftIdAt(createdAt) ?: 0L))
+
+    /** Page left empty: drop its draft (by [id], or by the page's [createdAt] if a background save wrote one). */
+    @Query("DELETE FROM Goal WHERE draft = 1 AND (id = :id OR createdAt = :createdAt)")
+    suspend fun deletePageDraft(id: Long, createdAt: Long)
 
     // Targeted updates (not @Update of a UI snapshot): a stale row can't overwrite newer state, and the WHERE guards
     // make resolving an already-resolved goal or promoting a non-dream a no-op.
