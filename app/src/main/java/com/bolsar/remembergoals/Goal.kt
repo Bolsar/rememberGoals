@@ -27,6 +27,13 @@ data class Goal(
 )
 
 /**
+ * One edit-page "Save" that changed a goal or dream, at [at]. Only the time is kept: the history tree just says "Edited".
+ * ponytail: no FK/index on [goalId]: a tiny table, and only drafts are ever deleted (drafts are never edited).
+ */
+@Entity
+data class GoalEdit(@PrimaryKey(autoGenerate = true) val id: Long = 0, val goalId: Long, val at: Long)
+
+/**
  * What the Add Goal page writes. [id]: 0 for a new page, else the reopened draft (overwritten in place, no duplicate).
  * [amount] is the raw digits field ("0" is dropped, the page blocks Add on it).
  * - [draft] (page left without Add): whatever was typed, with no deadline and the draft's [createdAt] kept (it never
@@ -52,18 +59,22 @@ fun pageGoal(
 }
 
 /**
- * Edit page "Save" on an ACTIVE goal: same start (createdAt), so the card keeps its place; the deadline is re-counted
- * from that start. null = invalid (blank title, or no amount: a goal can't lose its duration here).
+ * Edit page "Save" on an ACTIVE goal or dream. Goal: same start (createdAt), so the card keeps its place; the deadline
+ * is re-counted from that start; no amount = invalid (a goal can't lose its duration here). Dream: no amount = stays a
+ * dream; an amount makes it a goal counted from [now], createdAt = [now] (lands on top, like Promote).
+ * null = invalid (blank title, or a goal without an amount).
  */
-fun Goal.edited(title: String, description: String, amount: String, unit: DurationUnit): Goal? {
-    val n = amount.toIntOrNull()?.takeIf { it > 0 } ?: return null
-    if (title.isBlank()) return null
+fun Goal.edited(title: String, description: String, amount: String, unit: DurationUnit, now: Long): Goal? {
+    val n = amount.toIntOrNull()?.takeIf { it > 0 }
+    if (title.isBlank() || (n == null && deadline != null)) return null
+    val start = if (deadline == null && n != null) now else createdAt
     return copy(
         title = title.trim(),
         description = description.trim().ifBlank { null },
         durationAmount = n,
-        durationUnit = unit,
-        deadline = deadlineFrom(createdAt, n, unit),
+        durationUnit = unit.takeIf { n != null },
+        deadline = n?.let { deadlineFrom(start, it, unit) },
+        createdAt = start,
     )
 }
 
@@ -110,9 +121,27 @@ data class GoalEvent(override val goal: Goal, val overdue: Boolean) : Entry {
 fun timeline(goals: List<Goal>, now: Long): List<Entry> = goals.flatMap { g ->
     listOfNotNull(
         GoalCard(g),
-        GoalEvent(g, overdue = true).takeIf {
-            g.deadline != null && g.deadline < now && (g.status == Status.ACTIVE || (g.resolvedAt ?: 0) > g.deadline)
-        },
+        GoalEvent(g, overdue = true).takeIf { g.overdueAt(now) != null },
         GoalEvent(g, overdue = false).takeIf { g.resolvedAt != null },
     )
 }.sortedByDescending { it.time }
+
+/** When the deadline passed, if that counts: still ACTIVE past it, or resolved late. null otherwise (and for dreams). */
+fun Goal.overdueAt(now: Long): Long? =
+    deadline?.takeIf { it < now && (status == Status.ACTIVE || (resolvedAt ?: 0) > it) }
+
+enum class HistoryKind { CREATED, EDITED, OVERDUE, ACHIEVED, FAILED }
+
+/**
+ * The history tree on the edit page, oldest first: created, every logged edit ([edits] = times), the deadline passing
+ * (same rule as the list's overdue event) and the resolution.
+ * ponytail: Created is pinned first. A dream that became a goal restarts its createdAt at that moment, so its earlier
+ * (dream) edits would otherwise sort above "Created"; store the original creation time if that ever matters.
+ */
+fun history(goal: Goal, edits: List<Long>, now: Long): List<Pair<HistoryKind, Long>> =
+    listOf(HistoryKind.CREATED to goal.createdAt) + (
+        edits.map { HistoryKind.EDITED to it } + listOfNotNull(
+            goal.overdueAt(now)?.let { HistoryKind.OVERDUE to it },
+            goal.resolvedAt?.let { (if (goal.status == Status.ACHIEVED) HistoryKind.ACHIEVED else HistoryKind.FAILED) to it },
+        )
+    ).sortedBy { it.second }

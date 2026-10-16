@@ -1069,3 +1069,36 @@ Reproduced before and swept 0.1–1.0s gaps after: no stuck page, app never quit
 **Stack style** (user request): pages push in from the right over the list (list slides a quarter left, parallax) and
 pop out to the right; `tween(320, FastOutSlowInEasing)` instead of the vertical slide + fade. The shorter exit also
 shrinks the ignored-tap window to ~0.35s.
+
+## Edit goals + dreams, edit log, history tree, real page stack
+
+User request: stack-style open/close for every page; tap a goal **or dream** to open the Add Goal page as its edit page;
+mark edited goals; a "tree" of Created / Edited / Overdue / Achieved / Failed.
+- **Page stack** (`GoalsScreen`): `page: Long?` -> saveable `stack: List<Long>` (top last). `open(id)` pushes (still
+  ignored while the parent `pages` transition `isRunning`, the freeze fix), `pop()` drops the top; each page keeps its
+  `closed` flag. `AnimatedContent(contentKey = top)` picks push vs pop by stack size, same slide/parallax specs. So a
+  dream's edit page pushes *over* the Dreams page and back pops to Dreams. An emptied Dreams page is removed from the
+  stack (wherever it is).
+- **Edit log** (DB v3): new table `GoalEdit(id, goalId, at)`, `MIGRATION_2_3` = one `CREATE TABLE` (SQL identical to
+  Room's generated one; no FK/index, `ponytail:`). `GoalDao.editLogged` = guarded edit + a log row only when a row
+  changed, one transaction. Cards (goal + dream) show "edited" when the id has a log row.
+- **Edit modes** (`AddGoalPage`): edit goal (as before) · edit dream ("Edit dream", empty duration = stays a dream,
+  a duration = becomes a goal from now, lands on top, first reminders scheduled; `Goal.edited(now)`) · achieved/failed
+  goal = read-only (title "Goal", fields `readOnly`, no Save). Save with nothing changed logs nothing. The page's goal is
+  frozen once closed so the exit slide never flips the title (dream -> goal moves between flows).
+- **History tree** (`HistoryTree`, `history()` in Goal.kt): rounded card under the form; a rail with TickBox-style
+  rounded nodes drawn on Canvas (Created "+" / Edited "/" outlined, Overdue "!" orange, Achieved check green, Failed X
+  red), date in the user's 12/24h format, the resolve note under the resolution. Rail + marks stroke in top to bottom
+  (spring). `Goal.overdueAt()` is shared with `timeline()`. Created is pinned first (a promoted dream's createdAt resets).
+- Tests: `EditGoalTest` (dream stays dream / becomes goal from now), new `HistoryTest`.
+
+**Verified on device (Samsung A25, `.debug` app only, dark theme):** v2 `.debug` build seeded with 2 dreams + 4 goals,
+updated in place to v3: `MIGRATION_2_3` ran (`user_version` 3), all rows kept. Tap dream on the Dreams page -> edit page
+pushes over Dreams, Save/back pops to Dreams; rename -> "edited" + Edited node; typing a duration -> goal on top, "Edit
+dream" closes; last dream promoted -> emptied Dreams page leaves the stack, list shown. Active goal edited twice -> 2
+Edited nodes (rail stretches to full row height); Save with nothing changed logs nothing. Achieved / failed cards open
+read-only ("Goal", no Save) with the note under the resolution; failed-late and overdue goals show "Deadline passed".
+15 guarded push/pop cycles: no freeze, page always reopens/closes. Light theme not checked (would need a device setting).
+**Rule:** device tests use the `.debug` app (`com.bolsar.remembergoals.debug`, own data) only; never write to, clear or
+uninstall the real `com.bolsar.remembergoals`. Script taps must check the app is still in front (a back on the list
+leaves the app, and later taps then land in whatever app is underneath).
