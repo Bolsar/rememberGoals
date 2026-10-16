@@ -3,8 +3,10 @@ package com.bolsar.remembergoals
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -14,6 +16,11 @@ class GoalsViewModel(app: Application) : AndroidViewModel(app) {
     // null until the first DB emission, so the UI can tell "loading" from "none yet".
     val goals: StateFlow<List<Goal>?> = dao.goals().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
     val dreams: StateFlow<List<Goal>?> = dao.dreams().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+    val editedIds: StateFlow<Set<Long>> =
+        dao.editedIds().map { it.toSet() }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptySet())
+
+    /** Edit times of one goal/dream, oldest first (its history tree). */
+    fun edits(id: Long): Flow<List<Long>> = dao.edits(id)
 
     /**
      * Add Goal page closed or sent to the background: [goal] from [pageGoal] (goal, dream or draft) is written over
@@ -28,12 +35,16 @@ class GoalsViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** [goal] from [Goal.edited]. Only ACTIVE goals (a goal resolved meanwhile stays as it was). Reminders follow the new deadline. */
+    /**
+     * [goal] from [Goal.edited], logged as one edit. Only ACTIVE goals/dreams (one resolved meanwhile stays as it was).
+     * Reminders follow the new deadline; a dream that just became a goal gets its first ones.
+     */
     fun edit(goal: Goal) {
         viewModelScope.launch {
-            if (dao.edit(goal.id, goal.title, goal.description, goal.durationAmount!!, goal.durationUnit!!, goal.deadline!!) == 0) return@launch
+            if (!dao.editLogged(goal, System.currentTimeMillis())) return@launch
+            val deadline = goal.deadline ?: return@launch // still a dream: nothing to remind
             cancelReminders(getApplication(), goal.id) // an old "pre" may no longer fit before the new deadline
-            scheduleReminders(getApplication(), goal.id, goal.deadline)
+            scheduleReminders(getApplication(), goal.id, deadline)
         }
     }
 

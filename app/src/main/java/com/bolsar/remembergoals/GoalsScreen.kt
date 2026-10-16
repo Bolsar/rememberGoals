@@ -15,6 +15,7 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
@@ -31,8 +32,11 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -82,6 +86,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.geometry.lerp
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
@@ -118,7 +123,7 @@ import java.time.temporal.ChronoUnit
 
 private val dateFormat = DateTimeFormatter.ofPattern("d MMM yyyy")
 private val CardShape = RoundedCornerShape(20.dp)
-// ponytail: the Dreams page shares the Add Goal page's `page: Long?` slot (ids are > 0), so one AnimatedContent swaps both.
+// ponytail: the Dreams page shares the page stack with Add Goal pages (ids are > 0), so one AnimatedContent swaps both.
 private const val DREAMS_PAGE = -1L
 
 private fun zoned(millis: Long): ZonedDateTime = Instant.ofEpochMilli(millis).atZone(ZoneId.systemDefault())
@@ -139,8 +144,10 @@ fun GoalsScreen(
     val goals by vm.goals.collectAsState() // null = not loaded yet (no empty-state flash)
     val loadedDreams by vm.dreams.collectAsState()
     val dreams = loadedDreams.orEmpty()
-    // Page over the list: null = none, 0 = new goal, > 0 = the draft being completed or the goal being edited, DREAMS_PAGE = dreams.
-    var page by rememberSaveable { mutableStateOf<Long?>(null) }
+    val editedIds by vm.editedIds.collectAsState()
+    // Pages over the list, top last: 0 = new goal, > 0 = the draft being completed or the goal/dream being edited,
+    // DREAMS_PAGE = dreams (an edited dream pushes over it). Empty = the list. A List of Longs is Bundle-safe.
+    var stack by rememberSaveable { mutableStateOf(listOf<Long>()) }
     // Ids, not Goal objects: saveable, and the lookup below always reads the fresh row.
     var resolvingId by rememberSaveable { mutableStateOf<Long?>(null) }
     var resolvingAchieved by rememberSaveable { mutableStateOf(true) }
@@ -171,11 +178,11 @@ fun GoalsScreen(
     // Scrolled out of view, or the last dream left: a pulled-out row hides again (Telegram: SHOWED -> HIDDEN).
     LaunchedEffect(list) { snapshotFlow { list.firstVisibleItemIndex > 0 }.collect { if (it) archive.gone() } }
     LaunchedEffect(loadedDreams?.isEmpty()) {
-        if (loadedDreams?.isEmpty() == true) { archive.gone(); if (page == DREAMS_PAGE) page = null } // Telegram closes an emptied archive
+        if (loadedDreams?.isEmpty() == true) { archive.gone(); stack = stack - DREAMS_PAGE } // Telegram closes an emptied archive
     }
     // Reset only after it's shown: clearing the key first would restart (cancel) this effect.
     // Only over the list (its Scaffold hosts the snackbar): opening a page cancels it and it shows again on return.
-    LaunchedEffect(archive.hint, page) { if (archive.hint && page == null) { snackbar.showSnackbar("Swipe down to see the dreams"); archive.hint = false } }
+    LaunchedEffect(archive.hint, stack.isEmpty()) { if (archive.hint && stack.isEmpty()) { snackbar.showSnackbar("Swipe down to see the dreams"); archive.hint = false } }
 
     val showReminders = remindersOff && goals.orEmpty().any { it.status == Status.ACTIVE && !it.draft }
     val showEmpty = goals?.isEmpty() == true && loadedDreams != null
@@ -196,29 +203,36 @@ fun GoalsScreen(
         }
     }
 
-    // Stack navigation: a page pushes in from the right over the list (which slides a quarter left, parallax) and pops
-    // back out to the right, the list returning underneath.
+    // Stack navigation: a page pushes in from the right over what's under it (which slides a quarter left, parallax)
+    // and pops back out to the right, the page below returning underneath.
     // One parent transition: it runs until the leaving page's exit is done too (each content's own `transition` doesn't).
-    val pages = updateTransition(page, label = "page")
+    val pages = updateTransition(stack, label = "pages")
+    // Ignore pushes until the last move has fully animated: reopening the same id mid-exit would revive that closed
+    // page's composition (its `closed` flag set: dead back arrow, system back quits the app). A content's own enter
+    // `transition` ends before the leaving page's slide-out, so it must be the parent [pages].
+    fun open(id: Long) { if (!pages.isRunning) stack = stack + id }
+    fun pop() { stack = stack.dropLast(1) }
     pages.AnimatedContent(
+        contentKey = { it.lastOrNull() },
         transitionSpec = {
             val slide = tween<IntOffset>(320, easing = FastOutSlowInEasing)
-            if (targetState != null) slideInHorizontally(slide) { it } togetherWith slideOutHorizontally(slide) { -it / 4 }
+            if (targetState.size > initialState.size) slideInHorizontally(slide) { it } togetherWith slideOutHorizontally(slide) { -it / 4 }
             else (slideInHorizontally(slide) { -it / 4 } togetherWith slideOutHorizontally(slide) { it }).apply { targetContentZIndex = -1f }
         },
-    ) { shown ->
+    ) { pagesShown ->
+        val shown = pagesShown.lastOrNull()
         if (shown == DREAMS_PAGE) {
-            DreamsPage(dreams, onBack = { page = null }, onPromote = { promotingId = it.id })
+            DreamsPage(dreams, editedIds, onBack = ::pop, onOpen = { open(it.id) }, onPromote = { promotingId = it.id })
             return@AnimatedContent
         }
         if (shown != null) {
-            AddGoalPage(shown, goal = goals?.find { it.id == shown }, onSave = vm::savePage, onEdit = vm::edit) { page = null }
+            val edits by remember(shown) { vm.edits(shown) }.collectAsState(emptyList())
+            AddGoalPage(
+                shown, goal = goals?.find { it.id == shown } ?: dreams.find { it.id == shown }, edits, now,
+                onSave = vm::savePage, onEdit = vm::edit, onClose = ::pop,
+            )
             return@AnimatedContent
         }
-        // Ignore taps until the page has fully animated out: reopening the same id mid-exit would revive that closed
-        // page's composition (its `closed` flag set: dead back arrow, system back quits the app). The list's own enter
-        // `transition` ends before the page's slide-out, so it must be the parent [pages].
-        fun open(id: Long) { if (!pages.isRunning) page = id }
         Scaffold(
             containerColor = MaterialTheme.colorScheme.background,
             topBar = {
@@ -256,8 +270,8 @@ fun GoalsScreen(
                         when (entry) {
                             is GoalCard -> if (entry.goal.draft) DraftCardView(entry.goal) { open(entry.goal.id) }
                             else GoalCardView(
-                                entry.goal, now, highlighted == entry.goal.id,
-                                onEdit = { open(entry.goal.id) }.takeIf { entry.goal.status == Status.ACTIVE }, // resolved = final
+                                entry.goal, now, highlighted == entry.goal.id, entry.goal.id in editedIds,
+                                onOpen = { open(entry.goal.id) }, // resolved = read-only page
                             ) { resolvingId = entry.goal.id; resolvingAchieved = true }
                             is GoalEvent -> EventRow(entry) { showGoal(entry.goal) }
                         }
@@ -339,7 +353,7 @@ private fun RemindersOffLine() {
 
 /** The goal itself. It never moves; only its surface follows the status (and pulses when a reference chip points here). */
 @Composable
-private fun GoalCardView(goal: Goal, now: Long, highlighted: Boolean, onEdit: (() -> Unit)?, onTick: () -> Unit) {
+private fun GoalCardView(goal: Goal, now: Long, highlighted: Boolean, edited: Boolean, onOpen: () -> Unit, onTick: () -> Unit) {
     val deadline = goal.deadline!!
     val overdue = goal.status == Status.ACTIVE && deadline < now
     val tinted = goal.status != Status.ACTIVE || overdue
@@ -364,14 +378,14 @@ private fun GoalCardView(goal: Goal, now: Long, highlighted: Boolean, onEdit: ((
             .clip(CardShape)
             .background(bg)
             .border(2.dp, pulse.copy(alpha = ring), CardShape)
-            .clickable(enabled = onEdit != null, onClickLabel = "Edit goal") { onEdit?.invoke() }
+            .clickable(onClickLabel = if (goal.status == Status.ACTIVE) "Edit goal" else "Show goal", onClick = onOpen)
             .padding(start = 16.dp, top = 12.dp, bottom = 12.dp, end = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(Modifier.weight(1f).padding(vertical = 4.dp)) {
             Text(goal.title, style = MaterialTheme.typography.titleMedium)
             Text(
-                "Due ${day(deadline).format(dateFormat)}" + (countdown?.let { " · $it" } ?: ""),
+                "Due ${day(deadline).format(dateFormat)}" + (countdown?.let { " · $it" } ?: "") + if (edited) " · edited" else "",
                 style = MaterialTheme.typography.labelLarge,
                 color = muted,
                 modifier = Modifier.padding(top = 2.dp),
@@ -393,8 +407,7 @@ private fun EventRow(event: GoalEvent, onShowGoal: () -> Unit) {
     val goal = event.goal
     val status = if (event.overdue) Status.ACTIVE else goal.status // ACTIVE + overdue = the orange "deadline passed" tone
     val bg = MaterialTheme.colorScheme.tone(status, event.overdue).first
-    val clock = if (DateFormat.is24HourFormat(LocalContext.current)) "HH:mm" else "h:mm a" // the user's 12/24h setting
-    val date = zoned(event.time).format(DateTimeFormatter.ofPattern("d MMM yyyy, $clock"))
+    val date = zoned(event.time).format(dateTimeFormat())
     val meta = when (status) {
         Status.ACTIVE -> "Overdue · $date"
         Status.ACHIEVED -> "Achieved · $date" + if (day(event.time) < day(goal.deadline!!)) " · early" else ""
@@ -420,6 +433,11 @@ private fun EventRow(event: GoalEvent, onShowGoal: () -> Unit) {
         }
     }
 }
+
+/** "d MMM yyyy, 14:05" in the user's 12/24h setting. */
+@Composable
+private fun dateTimeFormat(): DateTimeFormatter =
+    DateTimeFormatter.ofPattern("d MMM yyyy, " + if (DateFormat.is24HourFormat(LocalContext.current)) "HH:mm" else "h:mm a")
 
 /**
  * Rounded box. ACTIVE = outline (tappable when [onClick] is set); ACHIEVED green + check, FAILED red + X, [overdue]
@@ -515,21 +533,26 @@ private fun DraftCardView(goal: Goal, onClick: () -> Unit) {
 }
 
 /**
- * Full Add Goal page. [id] 0 = new, else [goal] reopened: a draft, or an ACTIVE goal to edit (it prefills the fields
- * once; after that the saveable fields win, also across rotation and process death).
- * Editing: "Save" => [onEdit] with [Goal.edited] (start kept, deadline re-counted); back discards the changes, no draft. Add => [onClose] with a goal/dream; back (system or arrow) => a draft,
- * or null when nothing was typed. See [pageGoal]. The app going to the background writes the draft right away, so a
- * swipe from Recents keeps it; [onSave] finds that row again by the saveable createdAt, so nothing is duplicated.
+ * Full Add Goal page. [id] 0 = new, else [goal] reopened (it prefills the fields once; after that the saveable fields
+ * win, also across rotation and process death):
+ * - a draft: Add => [onClose] with a goal/dream; back (system or arrow) => a draft, or null when nothing was typed. See
+ *   [pageGoal]. The app going to the background writes the draft right away, so a swipe from Recents keeps it; [onSave]
+ *   finds that row again by the saveable createdAt, so nothing is duplicated.
+ * - an ACTIVE goal or dream: "Save" => [onEdit] with [Goal.edited] (goal: start kept, deadline re-counted; dream: a
+ *   duration makes it a goal from now), only if something changed. Back discards the changes, no draft.
+ * - an achieved/failed goal: read-only.
+ * Any existing goal/dream shows its history tree ([edits] = edit times) under the form.
  */
 @Composable
 private fun AddGoalPage(
     id: Long,
     goal: Goal?,
+    edits: List<Long>,
+    now: Long,
     onSave: (id: Long, createdAt: Long, Goal?) -> Unit,
     onEdit: (Goal) -> Unit,
     onClose: () -> Unit,
 ) {
-    val editing = goal?.draft == false
     var title by rememberSaveable { mutableStateOf(goal?.title.orEmpty()) }
     var amount by rememberSaveable { mutableStateOf(goal?.durationAmount?.toString().orEmpty()) }
     var unit by rememberSaveable { mutableStateOf(goal?.durationUnit ?: DurationUnit.DAYS) }
@@ -537,10 +560,22 @@ private fun AddGoalPage(
     val createdAt = rememberSaveable { goal?.createdAt ?: System.currentTimeMillis() }
     var tried by rememberSaveable { mutableStateOf(false) }
     var closed by remember { mutableStateOf(false) } // closes once: Add / back during the exit animation do nothing
-    // digits-only, max 3 chars => null or 0..999; an edited goal must keep a duration
-    val amountError = amount.toIntOrNull() == 0 || (editing && tried && amount.isEmpty())
+    // Frozen once closed: during the exit slide a saved dream moves from the dreams flow to the goals flow (a gap with
+    // no row) and gains a deadline; the title/mode must not flip mid-animation.
+    val kept = remember { mutableStateOf(goal) }
+    if (goal != null && !closed) kept.value = goal
+    val shown = kept.value
+    val editing = shown?.draft == false
+    val readOnly = editing && shown!!.status != Status.ACTIVE
+    val dream = editing && shown!!.deadline == null
+    val needsAmount = editing && !dream // an edited goal must keep a duration
+    // digits-only, max 3 chars => null or 0..999
+    val amountError = amount.toIntOrNull() == 0 || (needsAmount && tried && amount.isEmpty())
     fun save(add: Boolean) {
-        if (editing) { if (add) goal!!.edited(title, description, amount, unit)?.let(onEdit); return }
+        if (editing) {
+            if (add && !readOnly) shown!!.edited(title, description, amount, unit, System.currentTimeMillis())?.takeIf { it != shown }?.let(onEdit)
+            return
+        }
         onSave(id, createdAt, pageGoal(id, createdAt, title, description, amount, unit, System.currentTimeMillis(), draft = !add))
     }
     fun close(add: Boolean) {
@@ -559,17 +594,17 @@ private fun AddGoalPage(
         Row(Modifier.fillMaxWidth().padding(start = 4.dp, end = Gutter, top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             BackArrow(Modifier) { close(add = false) }
             Box(Modifier.weight(1f))
-            Button(
+            if (!readOnly) Button(
                 {
                     tried = true
-                    if (title.isNotBlank() && !(amountError || editing && amount.isEmpty())) close(add = true)
+                    if (title.isNotBlank() && !(amountError || needsAmount && amount.isEmpty())) close(add = true)
                 },
                 shape = RoundedCornerShape(14.dp),
             ) { Text(if (editing) "Save" else "Add") }
         }
         Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = Gutter, vertical = 12.dp)) {
             Text(
-                when { editing -> "Edit goal"; id == 0L -> "New goal"; else -> "Complete the goal" },
+                when { readOnly -> "Goal"; dream -> "Edit dream"; editing -> "Edit goal"; id == 0L -> "New goal"; else -> "Complete the goal" },
                 style = MaterialTheme.typography.headlineLarge,
                 modifier = Modifier.padding(start = 4.dp, bottom = 16.dp),
             )
@@ -578,13 +613,15 @@ private fun AddGoalPage(
                     "Name", title, { title = it },
                     error = "A goal needs a name".takeIf { tried && title.isBlank() },
                     textStyle = MaterialTheme.typography.titleMedium,
+                    readOnly = readOnly,
                 )
                 DurationFields(
                     amount, { amount = it }, unit, { unit = it }, amountError,
-                    emptyHint = if (editing) "A goal needs a duration" else "No duration — saved as a dream",
-                    start = if (editing) createdAt else System.currentTimeMillis(),
+                    emptyHint = when { dream -> "No duration — stays a dream"; editing -> "A goal needs a duration"; else -> "No duration — saved as a dream" },
+                    start = if (needsAmount) createdAt else System.currentTimeMillis(),
+                    readOnly = readOnly,
                 )
-                Field("Description", description, { description = it }, singleLine = false)
+                Field("Description", description, { description = it }, singleLine = false, readOnly = readOnly)
             }
             if (!editing) Text(
                 "Leave without adding and it stays here as a draft.",
@@ -592,8 +629,76 @@ private fun AddGoalPage(
                 color = scheme.onSurfaceVariant,
                 modifier = Modifier.padding(start = 4.dp, top = 12.dp),
             )
+            if (editing) HistoryTree(history(shown!!, edits, now), shown.note)
         }
     } }
+}
+
+/**
+ * The goal's life as a tree: one node per event on a rail, oldest at the top. Nodes are TickBox-style rounded boxes,
+ * hand-drawn: Created "+" and Edited "/" in outline, then the status ones filled in their strong hue (overdue orange
+ * "!", achieved green check, failed red X). The rail and marks stroke in, top to bottom, when the page opens.
+ */
+@Composable
+private fun HistoryTree(nodes: List<Pair<HistoryKind, Long>>, note: String?) {
+    val scheme = MaterialTheme.colorScheme
+    val format = dateTimeFormat()
+    val drawn = remember { Animatable(0f) }
+    LaunchedEffect(Unit) { drawn.animateTo(1f, spring(stiffness = Spring.StiffnessVeryLow)) }
+    Column(Modifier.padding(top = 12.dp).fillMaxWidth().clip(CardShape).background(scheme.surface).padding(16.dp)) {
+        Text("History", style = MaterialTheme.typography.labelLarge, color = scheme.onSurfaceVariant, modifier = Modifier.padding(bottom = 12.dp))
+        nodes.forEachIndexed { i, (kind, at) ->
+            val strong = when (kind) {
+                HistoryKind.OVERDUE -> scheme.tone(Status.ACTIVE, overdue = true).second
+                HistoryKind.ACHIEVED -> scheme.tone(Status.ACHIEVED, false).second
+                HistoryKind.FAILED -> scheme.tone(Status.FAILED, false).second
+                else -> null // outline node
+            }
+            val last = i == nodes.lastIndex
+            Row(Modifier.height(IntrinsicSize.Min)) {
+                Canvas(Modifier.width(20.dp).fillMaxHeight()) {
+                    val t = (drawn.value * nodes.size - i).coerceIn(0f, 1f) // each row gets an equal slice
+                    val s = size.width
+                    val w = 2.dp.toPx()
+                    val r = CornerRadius(5.dp.toPx())
+                    if (t > 0f) {
+                        if (!last) drawLine(scheme.outlineVariant, Offset(s / 2, s), Offset(s / 2, s + (size.height - s) * t), w, StrokeCap.Round)
+                        val box = Size(s, s) // the node sits at the top; the row below the rail is taller
+                        drawRoundRect(strong ?: scheme.surface, size = box, cornerRadius = r, alpha = t)
+                        if (strong == null) drawRoundRect(scheme.outline, size = box, cornerRadius = r, style = Stroke(1.5.dp.toPx()), alpha = t)
+                    }
+                    fun o(x: Float, y: Float) = Offset(s * x, s * y)
+                    val lines = when (kind) {
+                        HistoryKind.CREATED -> listOf(o(.5f, .3f) to o(.5f, .7f), o(.3f, .5f) to o(.7f, .5f))
+                        HistoryKind.EDITED -> listOf(o(.34f, .66f) to o(.66f, .34f))
+                        HistoryKind.OVERDUE -> listOf(o(.5f, .24f) to o(.5f, .56f), o(.5f, .75f) to o(.5f, .76f))
+                        HistoryKind.ACHIEVED -> listOf(o(.27f, .52f) to o(.44f, .68f), o(.44f, .68f) to o(.75f, .34f))
+                        HistoryKind.FAILED -> listOf(o(.32f, .32f) to o(.68f, .68f), o(.68f, .32f) to o(.32f, .68f))
+                    }
+                    lines.forEachIndexed { j, (a, b) ->
+                        val m = (t * lines.size - j).coerceIn(0f, 1f)
+                        if (m > 0f) drawLine(if (strong == null) scheme.primary else scheme.onSecondary, a, lerp(a, b, m), w, StrokeCap.Round)
+                    }
+                }
+                Column(Modifier.weight(1f).padding(start = 12.dp, bottom = if (last) 0.dp else 16.dp)) {
+                    Text(
+                        when (kind) {
+                            HistoryKind.CREATED -> "Created"
+                            HistoryKind.EDITED -> "Edited"
+                            HistoryKind.OVERDUE -> "Deadline passed"
+                            HistoryKind.ACHIEVED -> "Achieved"
+                            HistoryKind.FAILED -> "Not achieved"
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    Text(zoned(at).format(format), style = MaterialTheme.typography.labelLarge, color = scheme.onSurfaceVariant, modifier = Modifier.padding(top = 2.dp))
+                    if (kind == HistoryKind.ACHIEVED || kind == HistoryKind.FAILED) note?.let {
+                        Text("“$it”", style = MaterialTheme.typography.bodyMedium, color = scheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp))
+                    }
+                }
+            }
+        }
+    }
 }
 
 /** Amount (digits only, max 3) + days/weeks/months, then a line: the due-date preview, or [emptyHint] if no valid amount. */
@@ -606,6 +711,7 @@ private fun DurationFields(
     error: Boolean,
     emptyHint: String,
     start: Long = System.currentTimeMillis(), // the deadline counts from here (an edited goal: its own start)
+    readOnly: Boolean = false,
 ) {
     val n = amount.toIntOrNull()?.takeIf { it > 0 }
     Row(verticalAlignment = Alignment.Bottom) {
@@ -614,9 +720,10 @@ private fun DurationFields(
             modifier = Modifier.width(72.dp),
             error = "1–999".takeIf { error },
             keyboardType = KeyboardType.Number,
+            readOnly = readOnly,
         )
         Row(Modifier.padding(start = 12.dp, bottom = if (error) 26.dp else 7.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            DurationUnit.entries.forEach { u -> Choice(u.name.lowercase(), u == unit) { onUnit(u) } }
+            DurationUnit.entries.forEach { u -> Choice(u.name.lowercase(), u == unit, enabled = !readOnly) { onUnit(u) } }
         }
     }
     Text(
@@ -627,9 +734,12 @@ private fun DurationFields(
     )
 }
 
-/** Tapping the archive row: every dream as a card, each with Promote (the duration sheet). Back closes the page. */
+/**
+ * Tapping the archive row: every dream as a card, each with Promote (the duration sheet); tapping the card pushes its
+ * edit page over this one ([onOpen]). Back closes the page.
+ */
 @Composable
-private fun DreamsPage(dreams: List<Goal>, onBack: () -> Unit, onPromote: (Goal) -> Unit) {
+private fun DreamsPage(dreams: List<Goal>, editedIds: Set<Long>, onBack: () -> Unit, onOpen: (Goal) -> Unit, onPromote: (Goal) -> Unit) {
     // Closes once: while it animates out, a second back must reach the list/activity, not this leaving page.
     var closed by remember { mutableStateOf(false) }
     fun close() { if (!closed) { closed = true; onBack() } }
@@ -643,11 +753,18 @@ private fun DreamsPage(dreams: List<Goal>, onBack: () -> Unit, onPromote: (Goal)
             }
             items(dreams, key = { it.id }) { dream ->
                 Row(
-                    Modifier.animateItem().fillMaxWidth().clip(CardShape).background(scheme.surface).padding(start = 16.dp, end = 12.dp, top = 14.dp, bottom = 14.dp),
+                    Modifier
+                        .animateItem()
+                        .fillMaxWidth()
+                        .clip(CardShape)
+                        .background(scheme.surface)
+                        .clickable(onClickLabel = "Edit dream") { onOpen(dream) }
+                        .padding(start = 16.dp, end = 12.dp, top = 14.dp, bottom = 14.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(Modifier.weight(1f)) {
                         Text(dream.title, style = MaterialTheme.typography.titleMedium)
+                        if (dream.id in editedIds) Text("edited", style = MaterialTheme.typography.labelLarge, color = scheme.onSurfaceVariant)
                         dream.description?.let {
                             Text(it, style = MaterialTheme.typography.bodyMedium, color = scheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp))
                         }
@@ -775,7 +892,7 @@ private fun SetAgainDialog(goal: Goal, onDismiss: () -> Unit, onYes: () -> Unit)
 
 /** Pill-shaped option; selected = tinted with [color]. */
 @Composable
-private fun Choice(label: String, selected: Boolean, color: Color = MaterialTheme.colorScheme.primary, onClick: () -> Unit) {
+private fun Choice(label: String, selected: Boolean, color: Color = MaterialTheme.colorScheme.primary, enabled: Boolean = true, onClick: () -> Unit) {
     val bg by animateColorAsState(if (selected) color.copy(alpha = 0.15f) else Color.Transparent, spring(), label = "choice")
     Text(
         label,
@@ -785,7 +902,7 @@ private fun Choice(label: String, selected: Boolean, color: Color = MaterialThem
             .clip(CircleShape)
             .background(bg)
             .border(1.dp, if (selected) Color.Transparent else MaterialTheme.colorScheme.outlineVariant, CircleShape)
-            .selectable(selected, role = Role.RadioButton, onClick = onClick)
+            .selectable(selected, enabled = enabled, role = Role.RadioButton, onClick = onClick)
             .padding(horizontal = 12.dp, vertical = 8.dp),
         maxLines = 1,
     )
@@ -830,6 +947,7 @@ private fun Field(
     singleLine: Boolean = true,
     keyboardType: KeyboardType = KeyboardType.Text,
     textStyle: TextStyle = MaterialTheme.typography.bodyMedium,
+    readOnly: Boolean = false,
 ) {
     val scheme = MaterialTheme.colorScheme
     val shape = RoundedCornerShape(12.dp)
@@ -837,6 +955,7 @@ private fun Field(
         Text(label, style = MaterialTheme.typography.labelLarge, color = scheme.onSurfaceVariant, modifier = Modifier.padding(bottom = 6.dp))
         BasicTextField(
             value, onValueChange,
+            readOnly = readOnly,
             singleLine = singleLine,
             minLines = if (singleLine) 1 else 3,
             textStyle = textStyle.copy(color = scheme.onSurface),

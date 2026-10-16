@@ -21,6 +21,13 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    buildTypes {
+        // Debug = test app next to the real one (own data), so testing never touches real goals.
+        debug { applicationIdSuffix = ".debug"; versionNameSuffix = "-debug" }
+        // ponytail: release signed with the debug key, the key the installed real app already has, so updates keep its data.
+        release { signingConfig = signingConfigs.getByName("debug") }
+    }
+
     buildFeatures { compose = true }
 }
 
